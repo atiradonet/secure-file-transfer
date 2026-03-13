@@ -10,6 +10,10 @@ WORKSPACE="test-run-$(date +%s)"
 TEST_DIR="/tmp/${WORKSPACE}"
 TEST_FILE="/tmp/${WORKSPACE}-single.txt"
 
+# Clean up test fixtures on exit (covers both success and early failure).
+cleanup() { rm -rf "$TEST_DIR" "$TEST_FILE"; }
+trap cleanup EXIT
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -20,8 +24,26 @@ ask()  { read -r -p "  $* [press Enter to continue] " _; }
 
 wait_for_run() {
   local run_id=$1
+  if [[ -z "$run_id" || "$run_id" == "null" ]]; then
+    echo "Error: could not find the workflow run. Check 'gh run list' manually."
+    exit 1
+  fi
   info "Waiting for workflow run $run_id..."
   gh run watch "$run_id" --exit-status
+}
+
+# Resolve the most recent workflow run created at or after $1 (ISO timestamp).
+# Retries for up to 15 s in case GitHub hasn't listed the run yet.
+get_run_id() {
+  local since=$1 run_id=""
+  for _ in 1 2 3 4 5; do
+    run_id=$(gh run list --workflow=terraform.yml --limit=10 \
+      --json databaseId,createdAt \
+      --jq "[.[] | select(.createdAt >= \"$since\")] | .[0].databaseId")
+    [[ -n "$run_id" && "$run_id" != "null" ]] && break
+    sleep 3
+  done
+  echo "$run_id"
 }
 
 # Verify the signed URL was used by checking GCS Data Access Audit Logs.
@@ -108,9 +130,7 @@ gh workflow run terraform.yml \
   -f action=apply \
   -f workspace="$WORKSPACE"
 
-sleep 3
-RUN_ID=$(gh run list --workflow=terraform.yml --limit=10 --json databaseId,createdAt \
-  --jq "[.[] | select(.createdAt >= \"$BEFORE\")] | .[0].databaseId")
+RUN_ID=$(get_run_id "$BEFORE")
 wait_for_run "$RUN_ID"
 ok "Infrastructure provisioned"
 info "Bucket: secure-transfer-${WORKSPACE}"
@@ -158,14 +178,11 @@ gh workflow run terraform.yml \
   -f workspace="$WORKSPACE" \
   -f confirm_destroy=destroy
 
-sleep 3
-RUN_ID=$(gh run list --workflow=terraform.yml --limit=10 --json databaseId,createdAt \
-  --jq "[.[] | select(.createdAt >= \"$BEFORE\")] | .[0].databaseId")
+RUN_ID=$(get_run_id "$BEFORE")
 wait_for_run "$RUN_ID"
 ok "Workspace destroyed"
 
 # ---------------------------------------------------------------------------
-rm -rf "$TEST_DIR" "$TEST_FILE"
 echo ""
 echo "══════════════════════════════════════════════════════════════════════"
 echo "  Test run complete. All steps passed."
