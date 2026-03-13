@@ -19,7 +19,6 @@ key file is created or needed.
 import argparse
 import datetime
 import hashlib
-import mimetypes
 import pathlib
 import re
 import secrets
@@ -87,17 +86,20 @@ def generate_password() -> str:
     return ''.join(secrets.choice(alphabet) for _ in range(32))
 
 
-def create_encrypted_zip(folder: pathlib.Path, dest: pathlib.Path, password: str) -> None:
-    """Create an AES-256 encrypted zip of folder at dest, preserving structure."""
+def create_encrypted_zip(source: pathlib.Path, dest: pathlib.Path, password: str) -> None:
+    """Create an AES-256 encrypted zip of source (file or folder) at dest."""
     with pyzipper.AESZipFile(
         dest, 'w',
         compression=pyzipper.ZIP_DEFLATED,
         encryption=pyzipper.WZ_AES,
     ) as zf:
         zf.setpassword(password.encode())
-        for file in sorted(folder.rglob('*')):
-            if file.is_file():
-                zf.write(file, file.relative_to(folder.parent))
+        if source.is_file():
+            zf.write(source, source.name)
+        else:
+            for file in sorted(source.rglob('*')):
+                if file.is_file():
+                    zf.write(file, file.relative_to(source.parent))
 
 
 def _sign_and_print(blob, object_name, sha256, expiry, signing_sa, source_credentials, password=None):
@@ -141,6 +143,9 @@ def cmd_upload(args):
     if not filepath.exists():
         sys.exit(f"Error: file not found: {filepath}")
 
+    password = generate_password()
+    zip_name = f"{filepath.name}.zip"
+
     source_credentials, project = google.auth.default(
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
@@ -149,22 +154,23 @@ def cmd_upload(args):
     bucket_name, signing_sa = resolve(args.workspace, project)
     client = storage.Client(credentials=source_credentials)
 
-    object_name = (
-        f"{args.prefix.rstrip('/')}/{filepath.name}" if args.prefix else filepath.name
-    )
+    object_name = f"{args.prefix.rstrip('/')}/{zip_name}" if args.prefix else zip_name
     blob = client.bucket(bucket_name).blob(object_name)
 
-    content_type, _ = mimetypes.guess_type(str(filepath))
-    content_type = content_type or "application/octet-stream"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        zip_path = pathlib.Path(tmpdir) / zip_name
 
-    sha256 = hashlib.sha256(filepath.read_bytes()).hexdigest()
+        print(f"Encrypting  {filepath}  →  {zip_name}  (AES-256)")
+        create_encrypted_zip(filepath, zip_path, password)
 
-    print(f"Uploading  {filepath}  →  gs://{bucket_name}/{object_name}")
-    blob.upload_from_filename(str(filepath), content_type=content_type)
-    print(f"Upload complete.  SHA-256: {sha256}")
+        sha256 = hashlib.sha256(zip_path.read_bytes()).hexdigest()
 
-    expiry = parse_expiry(args.expiry)
-    _sign_and_print(blob, filepath.name, sha256, expiry, signing_sa, source_credentials)
+        print(f"Uploading  {zip_name}  →  gs://{bucket_name}/{object_name}")
+        blob.upload_from_filename(str(zip_path), content_type="application/zip")
+        print(f"Upload complete.  SHA-256: {sha256}")
+
+        expiry = parse_expiry(args.expiry)
+        _sign_and_print(blob, zip_name, sha256, expiry, signing_sa, source_credentials, password=password)
 
 
 def cmd_pack(args):

@@ -18,13 +18,11 @@ A **workspace** is the unit of isolation — one per transfer, named after the c
 gh workflow run terraform.yml -f action=apply -f workspace=acme-q1-report
   └─ provisions a private GCS bucket + signing service account for this workspace
 
-# single file
+# single file — AES-256 encrypted zip + signed URL + one-time password
 python scripts/transfer.py upload --workspace acme-q1-report --file report.pdf
-  └─ uploads the file and prints a time-limited signed URL + SHA-256 checksum
 
-# folder (AES-256 encrypted zip)
+# folder — same, but packs all files first
 python scripts/transfer.py pack --workspace acme-q1-report --folder ./documents
-  └─ zips, uploads, and prints a signed URL and a separate one-time password
 
                       [ share URL with customer → one-click download ]
 
@@ -82,23 +80,25 @@ gh workflow run terraform.yml -f action=apply -f workspace=acme-q1-report && \
 python scripts/transfer.py upload --workspace acme-q1-report --file report.pdf
 ```
 
-The script prints the signed URL to share with the customer. The URL expires after 1 hour by default.
-
-Along with the URL, the script prints a SHA-256 checksum of the uploaded file:
+The file is wrapped in an AES-256 encrypted zip before upload. The output format is identical to `pack` — a signed URL with SHA-256 checksum, followed by a separate password block:
 
 ```
+========================================================================
+Shareable URL (expires 2026-03-13 12:00 UTC):
+
+https://storage.googleapis.com/...
+
 Integrity:  SHA-256 = 3b4c9f...
+========================================================================
+
+────────────────────────────────────────────────────────────────────────
+PASSWORD — share via a separate channel, do NOT send with the URL:
+
+Xk9mP2rL...
+────────────────────────────────────────────────────────────────────────
 ```
 
-Share the checksum with the recipient alongside the URL so they can verify the file after downloading:
-
-```bash
-# macOS
-shasum -a 256 <downloaded-file>
-
-# Linux
-sha256sum <downloaded-file>
-```
+Share the URL (and checksum) by one channel and the password by another. The recipient unzips with 7-Zip — see [Transferring a folder](#transferring-a-folder) for unzip instructions.
 
 ### Provision + pack (folder)
 
@@ -165,7 +165,7 @@ Each gets its own bucket (`secure-transfer-<workspace>`) and can be torn down in
 
 ## Transferring a folder
 
-Use `pack` to transfer multiple files. It creates an AES-256 encrypted zip of the entire folder (preserving structure), uploads it, and prints the signed URL and a randomly generated 32-character password separately:
+Both `upload` and `pack` encrypt their payload with AES-256 before uploading. Use `pack` when you have multiple files — it zips the entire folder (preserving structure) before encrypting:
 
 ```bash
 python scripts/transfer.py pack --workspace acme-q1-report --folder ./documents
@@ -239,6 +239,7 @@ Several security findings from code reviews were deliberately not addressed. Eac
 - **Keyless URL signing** — the script impersonates the per-workspace signing SA via the IAM `signBlob` API using your local ADC credentials, revocable at any time.
 - **No accidental public access** — buckets have `public_access_prevention = enforced` and uniform bucket-level access; objects can never be made public.
 - **Signed URLs are read-only and time-limited** — scoped to `GET` only, expire at the requested time (default 1h, max 24h).
-- **File integrity** — a SHA-256 checksum is computed before upload and printed alongside the signed URL. Recipients can verify the file was not modified in transit or at rest.
+- **Encryption at rest and in transit** — every upload (single file or folder) is wrapped in an AES-256 encrypted zip with a randomly generated 32-character password. The password is printed separately so it can be shared via a different channel from the URL.
+- **File integrity** — a SHA-256 checksum of the encrypted zip is computed before upload and printed alongside the signed URL. Recipients can verify the file was not modified in transit or at rest.
 - **Audit trail** — GCS Data Access Audit Logs (READ + WRITE) are enabled at the project level. Every file access is recorded in Cloud Audit Logs.
 - **Automatic cleanup** — files auto-delete after 1 day; the entire workspace (bucket, service account, IAM bindings) is torn down after 36 hours by a scheduled cleanup workflow.

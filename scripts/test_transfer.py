@@ -191,7 +191,7 @@ class TestCmdUpload:
         mock_default.return_value = (mock_creds, "test-project")
 
         mock_blob = MagicMock()
-        mock_blob.generate_signed_url.return_value = "https://signed.url/report.pdf"
+        mock_blob.generate_signed_url.return_value = "https://signed.url/report.pdf.zip"
         mock_bucket = MagicMock()
         mock_bucket.blob.return_value = mock_blob
         mock_client_cls.return_value.bucket.return_value = mock_bucket
@@ -199,13 +199,13 @@ class TestCmdUpload:
         # Act
         transfer.cmd_upload(self._make_args(test_file))
 
-        # Assert
-        mock_blob.upload_from_filename.assert_called_once_with(
-            str(test_file), content_type="application/pdf"
-        )
+        # Assert — file is always uploaded as an AES-256 zip
+        mock_blob.upload_from_filename.assert_called_once()
+        _, kwargs = mock_blob.upload_from_filename.call_args
+        assert kwargs["content_type"] == "application/zip"
         mock_blob.generate_signed_url.assert_called_once()
         out = capsys.readouterr().out
-        assert "https://signed.url/report.pdf" in out
+        assert "https://signed.url/report.pdf.zip" in out
 
     @patch("transfer.google.auth.default")
     @patch("transfer.storage.Client")
@@ -249,12 +249,13 @@ class TestCmdUpload:
 
     @patch("transfer.google.auth.default")
     @patch("transfer.storage.Client")
-    def test_upload_unknown_extension_uses_octet_stream(
-        self, mock_client_cls, mock_default, tmp_path
+    def test_upload_prints_password(
+        self, mock_client_cls, mock_default, tmp_path, capsys
     ):
-        test_file = tmp_path / "data.unknownext"
-        test_file.write_bytes(b"x")
+        test_file = tmp_path / "report.pdf"
+        test_file.write_bytes(b"data")
         mock_creds = MagicMock()
+        mock_creds.token = "tok"
         mock_default.return_value = (mock_creds, "proj")
         mock_blob = MagicMock()
         mock_blob.generate_signed_url.return_value = "https://url"
@@ -262,9 +263,26 @@ class TestCmdUpload:
 
         transfer.cmd_upload(self._make_args(test_file))
 
-        mock_blob.upload_from_filename.assert_called_once_with(
-            str(test_file), content_type="application/octet-stream"
-        )
+        assert "PASSWORD" in capsys.readouterr().out
+
+    @patch("transfer.google.auth.default")
+    @patch("transfer.storage.Client")
+    def test_upload_zip_name_matches_file(
+        self, mock_client_cls, mock_default, tmp_path
+    ):
+        test_file = tmp_path / "report.pdf"
+        test_file.write_bytes(b"data")
+        mock_creds = MagicMock()
+        mock_default.return_value = (mock_creds, "proj")
+        mock_blob = MagicMock()
+        mock_blob.generate_signed_url.return_value = "https://url"
+        mock_bucket = MagicMock()
+        mock_bucket.blob.return_value = mock_blob
+        mock_client_cls.return_value.bucket.return_value = mock_bucket
+
+        transfer.cmd_upload(self._make_args(test_file))
+
+        mock_bucket.blob.assert_called_with("report.pdf.zip")
 
     @patch("transfer.google.auth.default")
     @patch("transfer.storage.Client")
@@ -283,7 +301,7 @@ class TestCmdUpload:
 
         transfer.cmd_upload(self._make_args(test_file, prefix="folder"))
 
-        mock_bucket.blob.assert_called_with("folder/file.txt")
+        mock_bucket.blob.assert_called_with("folder/file.txt.zip")
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +358,17 @@ class TestCreateEncryptedZip:
             zf.setpassword(b"password123")
             names = zf.namelist()
         assert any("invoices/inv001.pdf" in n for n in names)
+
+    def test_single_file_is_zipped(self, tmp_path):
+        src = tmp_path / "report.pdf"
+        src.write_bytes(b"data")
+        dest = tmp_path / "out.zip"
+        transfer.create_encrypted_zip(src, dest, "password123")
+        import pyzipper
+        with pyzipper.AESZipFile(dest) as zf:
+            zf.setpassword(b"password123")
+            names = zf.namelist()
+        assert names == ["report.pdf"]
 
     def test_wrong_password_raises(self, tmp_path):
         src = tmp_path / "docs"
