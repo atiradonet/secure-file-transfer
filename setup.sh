@@ -53,7 +53,11 @@ gcloud services enable \
   storage.googleapis.com \
   iam.googleapis.com \
   iamcredentials.googleapis.com \
+  cloudresourcemanager.googleapis.com \
   --project="$GCP_PROJECT"
+
+echo "    Waiting 30s for API enablement to propagate..."
+sleep 30
 
 # ---------------------------------------------------------------------------
 # 2. Terraform state bucket
