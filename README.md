@@ -18,13 +18,19 @@ A **workspace** is the unit of isolation — one per transfer, named after the c
 gh workflow run terraform.yml -f action=apply -f workspace=acme-q1-report
   └─ provisions a private GCS bucket + signing service account for this workspace
 
+# single file
 python scripts/transfer.py upload --workspace acme-q1-report --file report.pdf
-  └─ uploads the file and prints a time-limited signed URL
+  └─ uploads the file and prints a time-limited signed URL + SHA-256 checksum
+
+# folder (AES-256 encrypted zip)
+python scripts/transfer.py pack --workspace acme-q1-report --folder ./documents
+  └─ zips, uploads, and prints a signed URL and a separate one-time password
 
                       [ share URL with customer → one-click download ]
 
 gh workflow run terraform.yml -f action=destroy -f workspace=acme-q1-report -f confirm_destroy=destroy
   └─ removes the bucket, the service account, and all files
+  └─ (or let the scheduled cleanup handle it automatically after 36 hours)
 ```
 
 Signed URLs are served from `storage.googleapis.com`, which enforces TLS 1.2 / 1.3 and strong ECDHE cipher suites.
@@ -36,6 +42,7 @@ Signed URLs are served from `storage.googleapis.com`, which enforces TLS 1.2 / 1
 - A GCP project
 - `gcloud` CLI authenticated: `gcloud auth login && gcloud config set project <project_id>`
 - `gh` CLI authenticated: `gh auth login`
+- `terraform` CLI in PATH (used by `setup.sh` for the bootstrap step)
 - `python3` in PATH
 
 ---
@@ -68,7 +75,7 @@ cd scripts && python -m venv .venv && source .venv/bin/activate && pip install -
 
 ## Workflow
 
-### Provision + upload in one command
+### Provision + upload (single file)
 
 ```bash
 gh workflow run terraform.yml -f action=apply -f workspace=acme-q1-report && \
@@ -92,6 +99,15 @@ shasum -a 256 <downloaded-file>
 # Linux
 sha256sum <downloaded-file>
 ```
+
+### Provision + pack (folder)
+
+```bash
+gh workflow run terraform.yml -f action=apply -f workspace=acme-q1-report && \
+python scripts/transfer.py pack --workspace acme-q1-report --folder ./documents
+```
+
+See [Transferring a folder](#transferring-a-folder) for the full output format and unzip instructions.
 
 ### Tear down a workspace
 
@@ -125,7 +141,7 @@ You can still tear down a specific workspace manually at any time — automatic 
 
 ### Tear down the project entirely
 
-When you are done with the tool and want a clean GCP account, run a workspace destroy for each active workspace first, then tear down the long-lived bootstrap resources:
+When you are done with the tool and want a clean GCP account, destroy all active workspaces first (or use `cleanup.yml` to do it in bulk), then tear down the long-lived bootstrap resources:
 
 ```bash
 terraform -chdir=terraform/bootstrap init -backend-config="bucket=<project_id>-tf-state"
@@ -196,8 +212,11 @@ python scripts/transfer.py list --workspace acme-q1-report
 # Delete a specific file before it expires
 python scripts/transfer.py delete --workspace acme-q1-report --object report.pdf --confirm report.pdf
 
-# Override the default 1h expiry (max 24h)
+# Override the default 1h expiry on upload (max 24h)
 python scripts/transfer.py upload --workspace acme-q1-report --file report.pdf --expiry 4h
+
+# Override the default 1h expiry on pack (max 24h)
+python scripts/transfer.py pack --workspace acme-q1-report --folder ./documents --expiry 4h
 ```
 
 ---

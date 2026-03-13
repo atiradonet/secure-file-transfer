@@ -1,7 +1,8 @@
 name: Cleanup — destroy expired workspaces
 
-# Runs every hour and tears down any workspace whose GCS bucket is older than
-# the TTL. Mirrors what terraform.yml does for a manual destroy, just looped.
+# Runs twice daily (06:00 and 18:00 UTC) and tears down any workspace whose
+# GCS bucket is older than the TTL. Mirrors what terraform.yml does for a
+# manual destroy, just looped. Worst-case scheduling overhead: 12 hours.
 #
 # Can also be triggered manually with a custom TTL — useful for bulk teardown
 # or testing the cleanup logic without waiting for the scheduler.
