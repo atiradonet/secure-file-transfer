@@ -28,8 +28,8 @@ provider "google" {
 
 # ---------------------------------------------------------------------------
 # Private GCS bucket
-# The bucket name matches the Terraform workspace name so --bucket in the
-# Python script is always predictable: secure-transfer-<workspace>
+# The bucket name matches the Terraform workspace name so the bucket is
+# always predictable: secure-transfer-<workspace>
 # ---------------------------------------------------------------------------
 resource "google_storage_bucket" "transfer" {
   name                        = "secure-transfer-${terraform.workspace}"

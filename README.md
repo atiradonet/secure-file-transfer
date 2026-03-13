@@ -20,9 +20,11 @@ gh workflow run terraform.yml -f action=apply -f workspace=acme-q1-report
 
 # single file — AES-256 encrypted zip + signed URL + one-time password
 python scripts/transfer.py upload --workspace acme-q1-report --file report.pdf
+# or: ./transfer/transfer upload --workspace acme-q1-report --file report.pdf
 
 # folder — same, but packs all files first
 python scripts/transfer.py pack --workspace acme-q1-report --folder ./documents
+# or: ./transfer/transfer pack --workspace acme-q1-report --folder ./documents
 
                       [ share URL with customer → one-click download ]
 
@@ -41,7 +43,22 @@ Signed URLs are served from `storage.googleapis.com`, which enforces TLS 1.2 / 1
 - `gcloud` CLI authenticated: `gcloud auth login && gcloud config set project <project_id>`
 - `gh` CLI authenticated: `gh auth login`
 - `terraform` CLI in PATH (used by `setup.sh` for the bootstrap step)
-- `python3` in PATH
+- `python3` in PATH — for `scripts/transfer.py` (Python client)
+- `go` 1.22+ in PATH — only if using the Go binary (`transfer/`)
+
+---
+
+## Client options
+
+There are two interchangeable clients. Pick one:
+
+| | Python | Go binary |
+|---|---|---|
+| **Install** | `pip install -r scripts/requirements.txt` | `cd transfer && go build -o transfer .` |
+| **Requires** | Python 3 + pip | Go 1.22+ (one-time build) |
+| **Command** | `python scripts/transfer.py <cmd>` | `./transfer/transfer <cmd>` |
+
+Both support the same subcommands (`upload`, `pack`, `list`, `delete`) with identical flags and output format.
 
 ---
 
@@ -76,8 +93,13 @@ cd scripts && python -m venv .venv && source .venv/bin/activate && pip install -
 ### Provision + upload (single file)
 
 ```bash
-gh workflow run terraform.yml -f action=apply -f workspace=acme-q1-report && \
+gh workflow run terraform.yml -f action=apply -f workspace=acme-q1-report
+
+# Python
 python scripts/transfer.py upload --workspace acme-q1-report --file report.pdf
+
+# Go binary
+./transfer/transfer upload --workspace acme-q1-report --file report.pdf
 ```
 
 The file is wrapped in an AES-256 encrypted zip before upload. The output format is identical to `pack` — a signed URL with SHA-256 checksum, followed by a separate password block:
@@ -103,8 +125,13 @@ Share the URL (and checksum) by one channel and the password by another. The rec
 ### Provision + pack (folder)
 
 ```bash
-gh workflow run terraform.yml -f action=apply -f workspace=acme-q1-report && \
+gh workflow run terraform.yml -f action=apply -f workspace=acme-q1-report
+
+# Python
 python scripts/transfer.py pack --workspace acme-q1-report --folder ./documents
+
+# Go binary
+./transfer/transfer pack --workspace acme-q1-report --folder ./documents
 ```
 
 See [Encryption and unzipping](#encryption-and-unzipping) for the full output format and unzip instructions.
@@ -203,7 +230,9 @@ On Windows, 7-Zip or WinZip work. On Linux, `7z` (from `p7zip-full`) or `unzip` 
 
 ---
 
-## Other script commands
+## Other commands
+
+Examples use the Python client; replace `python scripts/transfer.py` with `./transfer/transfer` to use the Go binary.
 
 ```bash
 # List files currently in a workspace's bucket

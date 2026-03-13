@@ -2,7 +2,7 @@
 # test-run.sh — end-to-end walkthrough of the secure-file-transfer workflow.
 #
 # Runs through: provision → upload (single file) → pack (folder) → verify → tear down
-# Takes about 6 minutes.
+# Takes about 8-10 minutes.
 
 set -euo pipefail
 

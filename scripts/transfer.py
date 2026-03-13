@@ -39,6 +39,8 @@ from google.cloud import storage
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Same format enforced by transfer/workspace.go and .github/workflows/terraform.yml.
+# If the allowed format changes, update all three locations.
 _WORKSPACE_RE = re.compile(r'^[a-z0-9][a-z0-9-]{1,47}[a-z0-9]$')
 
 def validate_workspace(name: str) -> None:

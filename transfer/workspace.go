@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+// workspaceRE enforces the same format as scripts/transfer.py and .github/workflows/terraform.yml.
+// If the allowed format changes, update all three locations.
 var workspaceRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,47}[a-z0-9]$`)
 
 func validateWorkspace(name string) error {
