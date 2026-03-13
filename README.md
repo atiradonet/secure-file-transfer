@@ -4,14 +4,9 @@ Instead of emailing attachments, using a shared drive, or spinning up a permanen
 
 Each transfer is isolated, so sharing a contract with Client A and a report with Client B are completely independent — separate storage, separate access, no cross-contamination.
 
-The security posture is intentional: files are never public, links expire (default one hour), and there is no permanent service account key that could be leaked or stolen. The moment the link expires or you tear down the workspace, access is gone.
+The security posture is intentional: files are never public, links expire (default one hour), and there is no permanent credential that could be leaked or stolen. The moment the link expires or you tear down the workspace, access is gone.
 
 The operational overhead is minimal by design — one command to set up, one command to share, one command to clean up. The setup burden for someone new to the tool is also a single script.
-
----
-
-Each transfer runs in its own isolated workspace with a dedicated private bucket. Infrastructure
-is provisioned on demand via a GitHub Actions pipeline and torn down when the transfer is complete.
 
 ---
 
@@ -23,7 +18,7 @@ A **workspace** is the unit of isolation — one per transfer, named after the c
 gh workflow run terraform.yml -f action=apply -f workspace=acme-q1-report
   └─ provisions a private GCS bucket + signing service account for this workspace
 
-python transfer.py upload --workspace acme-q1-report --file report.pdf
+python scripts/transfer.py upload --workspace acme-q1-report --file report.pdf
   └─ uploads the file and prints a time-limited signed URL
 
                       [ share URL with customer → one-click download ]
@@ -32,8 +27,7 @@ gh workflow run terraform.yml -f action=destroy -f workspace=acme-q1-report -f c
   └─ removes the bucket, the service account, and all files
 ```
 
-Signed URLs are served from `storage.googleapis.com`, which enforces TLS 1.2 / 1.3 and
-strong ECDHE cipher suites. No service-account key file is ever created or stored.
+Signed URLs are served from `storage.googleapis.com`, which enforces TLS 1.2 / 1.3 and strong ECDHE cipher suites.
 
 ---
 
@@ -42,7 +36,7 @@ strong ECDHE cipher suites. No service-account key file is ever created or store
 - A GCP project
 - `gcloud` CLI authenticated: `gcloud auth login && gcloud config set project <project_id>`
 - `gh` CLI authenticated: `gh auth login`
-- Python 3.9+
+- `python3` in PATH
 
 ---
 
@@ -57,10 +51,11 @@ bash setup.sh
 It will:
 1. Enable the required GCP APIs
 2. Create a GCS bucket for Terraform state
-3. Create a GitHub Actions service account with the necessary roles
-4. Set all four repository secrets (`GCP_PROJECT_ID`, `GCP_CREDENTIALS`, `GCP_SIGNING_MEMBERS`, `TF_STATE_BUCKET`)
-
-The service account key is written directly to the secret and deleted from disk immediately.
+3. Create a least-privilege custom IAM role scoped to exactly what Terraform needs
+4. Create a GitHub Actions service account with that role
+5. Configure Workload Identity Federation so GitHub Actions authenticates without any key file
+6. Enable GCS Data Access Audit Logs so every file access is recorded
+7. Set all repository secrets (`GCP_PROJECT_ID`, `GCP_SIGNING_MEMBERS`, `TF_STATE_BUCKET`, `WORKLOAD_IDENTITY_PROVIDER`, `GCP_SERVICE_ACCOUNT`)
 
 Then install the Python dependencies:
 
@@ -119,8 +114,10 @@ python scripts/transfer.py upload --workspace acme-q1-report --file report.pdf -
 
 ## Security notes
 
-- Buckets have `public_access_prevention = enforced` — objects can never be made public accidentally.
-- Signed URLs are scoped to `GET` only and expire at the time requested (default 1h, max 7d).
-- No service-account key file is created. The script impersonates the signing SA via the IAM
-  `signBlob` API using your local ADC credentials, which are revocable at any time.
-- Files auto-delete after 7 days even if the workspace is not explicitly destroyed.
+- **No credentials at rest** — GitHub Actions authenticates via Workload Identity Federation. No service account key is ever created or stored.
+- **Least-privilege deployer** — the GitHub Actions service account holds a custom role with only the 19 permissions Terraform needs. No broad `storage.admin` or `iam.admin`.
+- **Keyless URL signing** — the script impersonates the per-workspace signing SA via the IAM `signBlob` API using your local ADC credentials, revocable at any time.
+- **No accidental public access** — buckets have `public_access_prevention = enforced` and uniform bucket-level access; objects can never be made public.
+- **Signed URLs are read-only and time-limited** — scoped to `GET` only, expire at the requested time (default 1h, max 7d).
+- **Audit trail** — GCS Data Access Audit Logs (READ + WRITE) are enabled at the project level. Every file access is recorded in Cloud Audit Logs.
+- **Automatic cleanup** — files auto-delete after 7 days even if the workspace is not explicitly destroyed.
