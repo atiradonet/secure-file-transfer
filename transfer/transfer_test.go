@@ -259,9 +259,44 @@ func TestCreateEncryptedZip(t *testing.T) {
 		buf := make([]byte, 64)
 		_, readErr := io.ReadFull(rc, buf)
 		if readErr == nil {
-			t.Log("no error on read with wrong password — implementation-defined behaviour")
+			t.Error("expected error reading with wrong password — AES-256 authentication should fail")
 		}
-		// Either Open or Read should fail with wrong password for AES-256.
+		// Either Open or Read must fail with the wrong password for AES-256.
+	})
+}
+
+// ---------------------------------------------------------------------------
+// fileSHA256
+// ---------------------------------------------------------------------------
+
+func TestFileSHA256(t *testing.T) {
+	t.Run("known content produces expected digest", func(t *testing.T) {
+		f := filepath.Join(t.TempDir(), "data.txt")
+		if err := os.WriteFile(f, []byte("hello"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// echo -n "hello" | sha256sum → 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+		want := "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+		got, err := fileSHA256(f)
+		if err != nil {
+			t.Fatalf("fileSHA256: %v", err)
+		}
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("different content produces different digest", func(t *testing.T) {
+		dir := t.TempDir()
+		f1 := filepath.Join(dir, "a.txt")
+		f2 := filepath.Join(dir, "b.txt")
+		os.WriteFile(f1, []byte("aaa"), 0644)
+		os.WriteFile(f2, []byte("bbb"), 0644)
+		h1, _ := fileSHA256(f1)
+		h2, _ := fileSHA256(f2)
+		if h1 == h2 {
+			t.Error("expected different digests for different files")
+		}
 	})
 }
 
