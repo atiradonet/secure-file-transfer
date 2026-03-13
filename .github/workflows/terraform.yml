@@ -10,6 +10,10 @@ on:
         options:
           - apply
           - destroy
+      workspace:
+        description: "Workspace name — identifies this transfer (e.g. acme-q1-report). Each workspace gets its own isolated bucket."
+        required: true
+        type: string
       confirm_destroy:
         description: "Type 'destroy' to confirm teardown (required when action = destroy)"
         required: false
@@ -44,6 +48,9 @@ jobs:
 
       - name: Terraform Init
         run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
+
+      - name: Select or create workspace
+        run: terraform workspace select -or-create ${{ github.event.inputs.workspace }}
 
       - name: Terraform Apply
         if: github.event.inputs.action == 'apply'
