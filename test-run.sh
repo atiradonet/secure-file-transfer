@@ -103,7 +103,7 @@ if ! command -v go &>/dev/null; then
   echo "Error: go not found in PATH"
   exit 1
 fi
-(cd "$(dirname "$0")/transfer" && go build -o transfer .)
+(cd "$(dirname "$0")/transfer" && GOMODCACHE="${TMPDIR:-/tmp}/gomod-transfer" go build -o transfer .)
 ok "Binary built: $TRANSFER_BIN"
 
 # ---------------------------------------------------------------------------
