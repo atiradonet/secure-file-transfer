@@ -63,6 +63,7 @@ gcloud services enable \
   iamcredentials.googleapis.com \
   cloudresourcemanager.googleapis.com \
   sts.googleapis.com \
+  logging.googleapis.com \
   --project="$GCP_PROJECT"
 
 echo "    Waiting 30s for API enablement to propagate..."

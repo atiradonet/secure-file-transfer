@@ -23,6 +23,37 @@ wait_for_run() {
   gh run watch "$run_id" --exit-status
 }
 
+# Verify the signed URL was used by checking GCS Data Access Audit Logs.
+# No time filter — any DATA_READ by the signing SA is sufficient confirmation.
+check_download_occurred() {
+  local workspace=$1
+  local project
+  project=$(gcloud config get-value project 2>/dev/null)
+  local bucket="secure-transfer-${workspace}"
+  local signing_sa="st-signer-${workspace}@${project}.iam.gserviceaccount.com"
+
+  info "Verifying download via audit logs..."
+  local hit
+  hit=$(gcloud logging read \
+    "logName=\"projects/${project}/logs/cloudaudit.googleapis.com%2Fdata_access\" \
+     AND resource.type=\"gcs_bucket\" \
+     AND resource.labels.bucket_name=\"${bucket}\" \
+     AND protoPayload.authenticationInfo.principalEmail=\"${signing_sa}\"" \
+    --limit=1 \
+    --format="value(timestamp)" \
+    2>/dev/null)
+
+  if [[ -n "$hit" ]]; then
+    ok "Download confirmed via audit log ($hit)"
+  else
+    echo ""
+    echo "  ⚠  No download recorded in audit logs for this workspace."
+    echo "  → Logs can lag a few minutes, or the link was not used."
+    read -r -p "  Proceed with destroy anyway? [y/N] " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { info "Destroy cancelled."; exit 0; }
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
@@ -93,6 +124,7 @@ ask "Copy the URL above, open it in a browser, confirm the file downloads, then 
 # Step 4 — Tear down
 # ---------------------------------------------------------------------------
 step "4 / 4  Tear down workspace: $WORKSPACE"
+check_download_occurred "$WORKSPACE"
 info "Triggering terraform destroy..."
 gh workflow run terraform.yml \
   -f action=destroy \
