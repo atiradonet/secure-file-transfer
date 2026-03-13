@@ -17,6 +17,7 @@ key file is created or needed.
 
 import argparse
 import datetime
+import hashlib
 import mimetypes
 import pathlib
 import re
@@ -100,10 +101,11 @@ def cmd_upload(args):
     content_type, _ = mimetypes.guess_type(str(filepath))
     content_type = content_type or "application/octet-stream"
 
+    sha256 = hashlib.sha256(filepath.read_bytes()).hexdigest()
+
     print(f"Uploading  {filepath}  →  gs://{bucket_name}/{object_name}")
     blob.upload_from_filename(str(filepath), content_type=content_type)
-    blob.reload()
-    print(f"Upload complete.  CRC32c: {blob.crc32c}  |  MD5: {blob.md5_hash}")
+    print(f"Upload complete.  SHA-256: {sha256}")
 
     # Sign the URL via the IAM API using the operator's access token.
     # The signing SA email appears in the URL credential; GCS validates access
@@ -126,7 +128,7 @@ def cmd_upload(args):
     print()
     print(url)
     print()
-    print(f"Integrity:  CRC32c = {blob.crc32c}  |  MD5 = {blob.md5_hash}")
+    print(f"Integrity:  SHA-256 = {sha256}")
     print("=" * 72)
 
 
