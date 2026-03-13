@@ -2,7 +2,7 @@
 # test-run.sh — end-to-end walkthrough of the secure-file-transfer workflow.
 #
 # Runs through: provision → upload (single file) → pack (folder) → verify → tear down
-# Takes about 5 minutes.
+# Takes about 6 minutes.
 
 set -euo pipefail
 
@@ -74,12 +74,15 @@ if ! gh auth status &>/dev/null; then
 fi
 ok "GitHub CLI authenticated"
 
-VENV_DIR="$(dirname "$0")/scripts/.venv"
-if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
-  echo "Error: Python venv not found. Run: cd scripts && python -m venv .venv && pip install -r requirements.txt"
+# Build the Go binary
+TRANSFER_BIN="$(dirname "$0")/transfer/transfer"
+step "Building Go binary"
+if ! command -v go &>/dev/null; then
+  echo "Error: go not found in PATH"
   exit 1
 fi
-ok "Python venv found"
+(cd "$(dirname "$0")/transfer" && go build -o transfer .)
+ok "Binary built: $TRANSFER_BIN"
 
 # ---------------------------------------------------------------------------
 # Step 1 — Create test fixtures
@@ -116,15 +119,13 @@ info "Bucket: secure-transfer-${WORKSPACE}"
 info "Waiting 90 s for IAM propagation..."
 sleep 90
 
-source "$VENV_DIR/bin/activate"
-
 # ---------------------------------------------------------------------------
 # Step 3 — Upload single file
 # ---------------------------------------------------------------------------
 step "3 / 5  Upload single file"
 
 UPLOAD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-python "$(dirname "$0")/scripts/transfer.py" upload \
+"$TRANSFER_BIN" upload \
   --workspace "$WORKSPACE" \
   --file "$TEST_FILE" \
   --expiry 30m
@@ -137,12 +138,10 @@ ask "Download the zip above, enter the password, confirm the file contains the e
 # ---------------------------------------------------------------------------
 step "4 / 5  Pack folder"
 
-python "$(dirname "$0")/scripts/transfer.py" pack \
+"$TRANSFER_BIN" pack \
   --workspace "$WORKSPACE" \
   --folder "$TEST_DIR" \
   --expiry 30m
-
-deactivate
 
 echo ""
 ask "Download the zip above, enter the password, verify all 3 files and the subfolder — then press Enter"
