@@ -65,6 +65,16 @@ resource "google_storage_bucket_iam_member" "signer_viewer" {
   member = "serviceAccount:${google_service_account.signer.email}"
 }
 
+# Grant signing members iam.serviceAccounts.signBlob on this SA so they can
+# generate V4 signed URLs via the IAM API without a key file.
+# Scoped to this SA resource only — not a project-level grant.
+resource "google_service_account_iam_member" "signers" {
+  for_each           = toset(var.signing_sa_members)
+  service_account_id = google_service_account.signer.name
+  role               = "roles/iam.serviceAccountKeyAdmin"
+  member             = each.value
+}
+
 # Allow listed members to upload objects to the bucket
 resource "google_storage_bucket_iam_member" "uploaders" {
   for_each = toset(var.signing_sa_members)
