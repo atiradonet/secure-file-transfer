@@ -124,10 +124,9 @@ class TestCmdUpload:
         return args
 
     @patch("transfer.google.auth.default")
-    @patch("transfer.google.auth.impersonated_credentials.Credentials")
     @patch("transfer.storage.Client")
     def test_upload_calls_gcs_and_prints_url(
-        self, mock_client_cls, mock_impersonated, mock_default, tmp_path, capsys
+        self, mock_client_cls, mock_default, tmp_path, capsys
     ):
         # Arrange
         test_file = tmp_path / "report.pdf"
@@ -155,10 +154,9 @@ class TestCmdUpload:
         assert "https://signed.url/report.pdf" in out
 
     @patch("transfer.google.auth.default")
-    @patch("transfer.google.auth.impersonated_credentials.Credentials")
     @patch("transfer.storage.Client")
     def test_upload_uses_correct_bucket(
-        self, mock_client_cls, mock_impersonated, mock_default, tmp_path
+        self, mock_client_cls, mock_default, tmp_path
     ):
         test_file = tmp_path / "doc.pdf"
         test_file.write_bytes(b"x")
@@ -178,10 +176,9 @@ class TestCmdUpload:
             transfer.cmd_upload(args)
 
     @patch("transfer.google.auth.default")
-    @patch("transfer.google.auth.impersonated_credentials.Credentials")
     @patch("transfer.storage.Client")
     def test_prefix_prepended_to_object_name(
-        self, mock_client_cls, mock_impersonated, mock_default, tmp_path
+        self, mock_client_cls, mock_default, tmp_path
     ):
         test_file = tmp_path / "file.txt"
         test_file.write_bytes(b"x")

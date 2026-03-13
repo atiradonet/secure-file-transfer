@@ -49,8 +49,9 @@ resource "google_storage_bucket" "transfer" {
 }
 
 # ---------------------------------------------------------------------------
-# Service account used exclusively for signing download URLs
-# No long-lived key is created; callers impersonate it via the IAM API.
+# Service account used exclusively as the credential identity in signed URLs.
+# The operator calls iam.serviceAccounts.signBlob with their own ADC token,
+# specifying this SA — no key file or impersonation needed.
 # ---------------------------------------------------------------------------
 resource "google_service_account" "signer" {
   account_id   = "st-signer-${terraform.workspace}"
@@ -62,22 +63,6 @@ resource "google_storage_bucket_iam_member" "signer_viewer" {
   bucket = google_storage_bucket.transfer.name
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.signer.email}"
-}
-
-# Allow listed humans/SAs to impersonate the signer SA so they can call
-# iam.serviceAccounts.signBlob (used by the Python script for V4 signed URLs)
-resource "google_service_account_iam_member" "token_creators" {
-  for_each           = toset(var.signing_sa_members)
-  service_account_id = google_service_account.signer.name
-  role               = "roles/iam.serviceAccountTokenCreator"
-  member             = each.value
-}
-
-# The signing SA also needs to sign its own blobs (self-impersonation path)
-resource "google_service_account_iam_member" "self_signer" {
-  service_account_id = google_service_account.signer.name
-  role               = "roles/iam.serviceAccountTokenCreator"
-  member             = "serviceAccount:${google_service_account.signer.email}"
 }
 
 # Allow listed members to upload objects to the bucket

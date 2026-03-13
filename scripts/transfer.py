@@ -22,7 +22,6 @@ import pathlib
 import sys
 
 import google.auth
-import google.auth.impersonated_credentials
 import google.auth.transport.requests
 from google.cloud import storage
 
@@ -58,21 +57,6 @@ def parse_expiry(value: str) -> datetime.timedelta:
     return td
 
 
-def adc_client(signing_sa: str) -> tuple[storage.Client, object]:
-    """Authenticate via ADC and return an impersonated Storage client."""
-    source_credentials, project = google.auth.default(
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-    source_credentials.refresh(google.auth.transport.requests.Request())
-    target_creds = google.auth.impersonated_credentials.Credentials(
-        source_credentials=source_credentials,
-        target_principal=signing_sa,
-        target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
-        lifetime=300,
-    )
-    return storage.Client(credentials=target_creds), project
-
-
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -88,14 +72,12 @@ def cmd_upload(args):
     source_credentials.refresh(google.auth.transport.requests.Request())
 
     bucket_name, signing_sa = resolve(args.workspace, project)
-
-    # Upload as the operator (source credentials have objectCreator on the bucket)
-    upload_client = storage.Client(credentials=source_credentials)
+    client = storage.Client(credentials=source_credentials)
 
     object_name = (
         f"{args.prefix.rstrip('/')}/{filepath.name}" if args.prefix else filepath.name
     )
-    blob = upload_client.bucket(bucket_name).blob(object_name)
+    blob = client.bucket(bucket_name).blob(object_name)
 
     content_type, _ = mimetypes.guess_type(str(filepath))
     content_type = content_type or "application/octet-stream"
@@ -104,21 +86,16 @@ def cmd_upload(args):
     blob.upload_from_filename(str(filepath), content_type=content_type)
     print("Upload complete.")
 
-    # Sign the URL as the signing SA (has objectViewer + signBlob permission)
-    target_creds = google.auth.impersonated_credentials.Credentials(
-        source_credentials=source_credentials,
-        target_principal=signing_sa,
-        target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
-        lifetime=300,
-    )
-    signing_client = storage.Client(credentials=target_creds)
-    blob = signing_client.bucket(bucket_name).blob(object_name)
-
+    # Sign the URL via the IAM API using the operator's access token.
+    # The signing SA email appears in the URL credential; GCS validates access
+    # via the SA's objectViewer role on the bucket.
     expiry = parse_expiry(args.expiry)
     url = blob.generate_signed_url(
         version="v4",
         expiration=expiry,
         method="GET",
+        service_account_email=signing_sa,
+        access_token=source_credentials.token,
         response_disposition=f'attachment; filename="{filepath.name}"',
         response_type=content_type,
     )
