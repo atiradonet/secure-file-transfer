@@ -4,7 +4,6 @@ go 1.22
 
 require (
 	cloud.google.com/go/storage v1.49.0
-	github.com/spf13/cobra v1.8.1
 	github.com/yeka/zip v0.0.0-20231116150916-03d6312748a9
 	golang.org/x/oauth2 v0.24.0
 	google.golang.org/api v0.214.0
@@ -34,9 +33,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/googleapis/gax-go/v2 v2.14.0 // indirect
-	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
-	github.com/spf13/pflag v1.0.5 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.29.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.54.0 // indirect

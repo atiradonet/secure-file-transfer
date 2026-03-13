@@ -2,174 +2,36 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
-	"strings"
+	"path/filepath"
 	"time"
 
 	"cloud.google.com/go/storage"
 	"golang.org/x/oauth2/google"
-	"google.golang.org/api/googleapi"
 	iamv1 "google.golang.org/api/iam/v1"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
 
-// StorageClient is the interface used by commands — allows injection in tests.
-type StorageClient interface {
-	Upload(ctx context.Context, bucket, object, contentType, localPath string) error
-	SignedURL(bucket, object string, opts *storage.SignedURLOptions) (string, error)
-	ListObjects(ctx context.Context, bucket, prefix string) ([]ObjectInfo, error)
-	DeleteObject(ctx context.Context, bucket, object string) error
-}
-
-type ObjectInfo struct {
+type objectInfo struct {
 	Name    string
 	Size    int64
 	Updated time.Time
 }
 
-// realStorageClient wraps the GCS SDK.
-type realStorageClient struct {
-	client *storage.Client
+// workspaceResources derives the GCS bucket name and signer service account
+// email from the workspace name and GCP project.
+func workspaceResources(workspace, project string) (bucket, signerSA string) {
+	return "secure-transfer-" + workspace,
+		"st-signer-" + workspace + "@" + project + ".iam.gserviceaccount.com"
 }
 
-func newStorageClient(ctx context.Context) (*realStorageClient, error) {
-	c, err := storage.NewClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &realStorageClient{client: c}, nil
-}
-
-func (r *realStorageClient) Upload(ctx context.Context, bucket, object, contentType, localPath string) error {
-	f, err := os.Open(localPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	wc := r.client.Bucket(bucket).Object(object).NewWriter(ctx)
-	wc.ContentType = contentType
-	if _, err := io.Copy(wc, f); err != nil {
-		_ = wc.Close()
-		return err
-	}
-	return wc.Close()
-}
-
-func (r *realStorageClient) SignedURL(bucket, object string, opts *storage.SignedURLOptions) (string, error) {
-	return r.client.Bucket(bucket).SignedURL(object, opts)
-}
-
-func (r *realStorageClient) ListObjects(ctx context.Context, bucket, prefix string) ([]ObjectInfo, error) {
-	var results []ObjectInfo
-	query := &storage.Query{}
-	if prefix != "" {
-		query.Prefix = prefix
-	}
-	it := r.client.Bucket(bucket).Objects(ctx, query)
-	for {
-		attrs, err := it.Next()
-		if err != nil {
-			if err == iterator.Done {
-				break
-			}
-			return nil, err
-		}
-		results = append(results, ObjectInfo{
-			Name:    attrs.Name,
-			Size:    attrs.Size,
-			Updated: attrs.Updated,
-		})
-	}
-	return results, nil
-}
-
-func (r *realStorageClient) DeleteObject(ctx context.Context, bucket, object string) error {
-	return r.client.Bucket(bucket).Object(object).Delete(ctx)
-}
-
-// buildSignedURLOptions returns SignedURLOptions that use IAM signBlob.
-// objectName is used to set Content-Disposition so the browser downloads
-// the file under the correct name instead of opening it inline.
-func buildSignedURLOptions(ctx context.Context, signingServiceAccount string, expiry time.Duration, method, objectName, contentType string) (*storage.SignedURLOptions, error) {
-	iamSvc, err := iamv1.NewService(ctx, option.WithScopes("https://www.googleapis.com/auth/cloud-platform"))
-	if err != nil {
-		return nil, fmt.Errorf("creating IAM service: %w", err)
-	}
-	return &storage.SignedURLOptions{
-		GoogleAccessID: signingServiceAccount,
-		SignBytes: func(b []byte) ([]byte, error) {
-			req := &iamv1.SignBlobRequest{
-				BytesToSign: base64.StdEncoding.EncodeToString(b),
-			}
-			resp, err := iamSvc.Projects.ServiceAccounts.SignBlob(
-				"projects/-/serviceAccounts/"+signingServiceAccount, req,
-			).Context(ctx).Do()
-			if err != nil {
-				return nil, err
-			}
-			return base64.StdEncoding.DecodeString(resp.Signature)
-		},
-		Method:  method,
-		Expires: time.Now().Add(expiry),
-		Scheme:  storage.SigningSchemeV4,
-		// V4 signed URLs enforce response headers via query parameters.
-		// This makes the browser download the file with the correct name
-		// instead of opening it inline.
-		QueryParameters: url.Values{
-			"response-content-disposition": []string{fmt.Sprintf(`attachment; filename="%s"`, objectName)},
-			"response-content-type":        []string{contentType},
-		},
-	}, nil
-}
-
-func fileSHA256(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(data)
-	return fmt.Sprintf("%x", sum), nil
-}
-
-func printURLBlock(url, sha256sum, objectName string, expiry time.Duration, password string) {
-	expiresAt := time.Now().UTC().Add(expiry)
-	fmt.Println()
-	fmt.Println(strings.Repeat("=", 72))
-	fmt.Printf("Shareable URL (expires %s):\n", expiresAt.Format("2006-01-02 15:04 UTC"))
-	fmt.Println()
-	fmt.Println(url)
-	fmt.Println()
-	fmt.Printf("Integrity:  SHA-256 = %s\n", sha256sum)
-	fmt.Println(strings.Repeat("=", 72))
-	if password != "" {
-		fmt.Println()
-		fmt.Println(strings.Repeat("─", 72))
-		fmt.Println("PASSWORD — share via a separate channel, do NOT send with the URL:")
-		fmt.Println()
-		fmt.Println(password)
-		fmt.Println(strings.Repeat("─", 72))
-	}
-}
-
-// isNotFound returns true for GCS 404 errors.
-func isNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	if e, ok := err.(*googleapi.Error); ok {
-		return e.Code == 404
-	}
-	return false
-}
-
-// getProject reads the GCP project from Application Default Credentials.
-func getProject(ctx context.Context) (string, error) {
+// gcpProject reads the GCP project ID from Application Default Credentials.
+func gcpProject(ctx context.Context) (string, error) {
 	creds, err := google.FindDefaultCredentials(ctx, "https://www.googleapis.com/auth/cloud-platform")
 	if err != nil {
 		return "", fmt.Errorf("no Application Default Credentials found — run: gcloud auth application-default login")
@@ -178,4 +40,113 @@ func getProject(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("GCP project not set in ADC — run: gcloud config set project <project_id>")
 	}
 	return creds.ProjectID, nil
+}
+
+// gcsUpload uploads the file at localPath to gs://bucket/object.
+func gcsUpload(ctx context.Context, bucket, object, localPath string) error {
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return fmt.Errorf("creating storage client: %w", err)
+	}
+	defer client.Close()
+
+	f, err := os.Open(localPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	wc := client.Bucket(bucket).Object(object).NewWriter(ctx)
+	wc.ContentType = "application/zip"
+	if _, err := io.Copy(wc, f); err != nil {
+		_ = wc.Close()
+		return err
+	}
+	return wc.Close()
+}
+
+// gcsSignURL returns a V4 signed URL for the object using IAM signBlob.
+// The URL includes response-content-disposition and response-content-type
+// query parameters so the browser downloads the file with the correct name.
+func gcsSignURL(ctx context.Context, bucket, object, signerSA string, expiry time.Duration) (string, error) {
+	iamSvc, err := iamv1.NewService(ctx, option.WithScopes("https://www.googleapis.com/auth/cloud-platform"))
+	if err != nil {
+		return "", fmt.Errorf("creating IAM service: %w", err)
+	}
+
+	opts := &storage.SignedURLOptions{
+		GoogleAccessID: signerSA,
+		SignBytes: func(b []byte) ([]byte, error) {
+			req := &iamv1.SignBlobRequest{
+				BytesToSign: base64.StdEncoding.EncodeToString(b),
+			}
+			resp, err := iamSvc.Projects.ServiceAccounts.SignBlob(
+				"projects/-/serviceAccounts/"+signerSA, req,
+			).Context(ctx).Do()
+			if err != nil {
+				return nil, err
+			}
+			return base64.StdEncoding.DecodeString(resp.Signature)
+		},
+		Method:  "GET",
+		Expires: time.Now().Add(expiry),
+		Scheme:  storage.SigningSchemeV4,
+		// V4 signed URLs enforce response headers via query parameters so
+		// the browser downloads the file under the correct name.
+		QueryParameters: url.Values{
+			"response-content-disposition": []string{fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(object))},
+			"response-content-type":        []string{"application/zip"},
+		},
+	}
+
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return "", fmt.Errorf("creating storage client: %w", err)
+	}
+	defer client.Close()
+
+	return client.Bucket(bucket).SignedURL(object, opts)
+}
+
+// gcsListObjects returns metadata for all objects in the bucket whose name
+// starts with prefix. An empty prefix lists all objects.
+func gcsListObjects(ctx context.Context, bucket, prefix string) ([]objectInfo, error) {
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("creating storage client: %w", err)
+	}
+	defer client.Close()
+
+	query := &storage.Query{}
+	if prefix != "" {
+		query.Prefix = prefix
+	}
+
+	var results []objectInfo
+	it := client.Bucket(bucket).Objects(ctx, query)
+	for {
+		attrs, err := it.Next()
+		if err != nil {
+			if err == iterator.Done {
+				break
+			}
+			return nil, err
+		}
+		results = append(results, objectInfo{
+			Name:    attrs.Name,
+			Size:    attrs.Size,
+			Updated: attrs.Updated,
+		})
+	}
+	return results, nil
+}
+
+// gcsDeleteObject deletes a single object from the bucket.
+func gcsDeleteObject(ctx context.Context, bucket, object string) error {
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return fmt.Errorf("creating storage client: %w", err)
+	}
+	defer client.Close()
+	return client.Bucket(bucket).Object(object).Delete(ctx)
 }

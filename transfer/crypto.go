@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"math/big"
@@ -14,6 +15,7 @@ import (
 
 const passwordAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
+// generatePassword returns a 32-character alphanumeric password from crypto/rand.
 func generatePassword() (string, error) {
 	b := make([]byte, 32)
 	for i := range b {
@@ -27,7 +29,9 @@ func generatePassword() (string, error) {
 }
 
 // createEncryptedZip creates an AES-256 encrypted zip at dest.
-// source may be a single file or a directory (preserves structure).
+// source may be a single file or a directory.
+// For a directory, files are stored relative to the parent of source (same as Python).
+// Walk order is sorted for deterministic output.
 func createEncryptedZip(source, dest, password string) error {
 	outFile, err := os.Create(dest)
 	if err != nil {
@@ -47,7 +51,7 @@ func createEncryptedZip(source, dest, password string) error {
 		return addFileToZip(w, source, info.Name(), password)
 	}
 
-	// Collect and sort for deterministic ordering
+	// Collect and sort paths for deterministic ordering.
 	var files []string
 	err = filepath.Walk(source, func(path string, fi os.FileInfo, err error) error {
 		if err != nil {
@@ -63,6 +67,7 @@ func createEncryptedZip(source, dest, password string) error {
 	}
 	sort.Strings(files)
 
+	// Store files relative to the parent of source dir, matching Python behaviour.
 	base := filepath.Dir(source)
 	for _, path := range files {
 		rel, err := filepath.Rel(base, path)
@@ -88,4 +93,14 @@ func addFileToZip(w *zip.Writer, path, nameInZip, password string) error {
 	defer f.Close()
 	_, err = io.Copy(fw, f)
 	return err
+}
+
+// fileSHA256 returns the hex-encoded SHA-256 digest of the file at path.
+func fileSHA256(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum), nil
 }
