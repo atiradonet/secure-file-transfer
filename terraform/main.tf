@@ -71,7 +71,7 @@ resource "google_storage_bucket_iam_member" "signer_viewer" {
 resource "google_service_account_iam_member" "signers" {
   for_each           = toset(var.signing_sa_members)
   service_account_id = google_service_account.signer.name
-  role               = "roles/iam.serviceAccountKeyAdmin"
+  role               = "roles/iam.serviceAccountTokenCreator"
   member             = each.value
 }
 
