@@ -1,5 +1,15 @@
 terraform {
   required_version = ">= 1.5"
+
+  # Remote state stored in GCS so it persists across GitHub Actions runs.
+  # The bucket must exist before the first terraform init — create it once manually:
+  #   gsutil mb -p <project_id> gs://<project_id>-tf-state
+  #   gsutil versioning set on gs://<project_id>-tf-state
+  backend "gcs" {
+    bucket = "__TF_STATE_BUCKET__"   # replace with <project_id>-tf-state
+    prefix = "secure-file-transfer"
+  }
+
   required_providers {
     google = {
       source  = "hashicorp/google"

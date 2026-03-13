@@ -15,36 +15,46 @@ Signed URLs are served directly from `storage.googleapis.com`, which enforces TL
 
 ## Prerequisites
 
-- `terraform` >= 1.5
-- `gcloud` CLI authenticated: `gcloud auth application-default login`
-- Python 3.9+
 - GCP project with these APIs enabled:
   ```bash
   gcloud services enable storage.googleapis.com \
       iam.googleapis.com \
       iamcredentials.googleapis.com
   ```
+- A GCS bucket for Terraform state (create once):
+  ```bash
+  gsutil mb -p <project_id> gs://<project_id>-tf-state
+  gsutil versioning set on gs://<project_id>-tf-state
+  ```
+- A GCP service account with `roles/editor` (or narrower: Storage Admin + IAM Admin) and a JSON key exported for GitHub Actions auth.
+- Python 3.9+ and `gcloud` CLI (for running `transfer.py` locally).
+
+---
+
+## GitHub Actions secrets
+
+Set these in **Settings → Secrets and variables → Actions**:
+
+| Secret | Value |
+|---|---|
+| `GCP_PROJECT_ID` | your GCP project ID |
+| `GCP_CREDENTIALS` | contents of the service account JSON key |
+| `GCP_SIGNING_MEMBERS` | JSON array of IAM members, e.g. `["user:you@gmail.com"]` |
+| `TF_STATE_BUCKET` | name of the GCS bucket created above for Terraform state |
 
 ---
 
 ## Setup
 
-```bash
-cd terraform
-cp terraform.tfvars.example terraform.tfvars
-# edit terraform.tfvars — set project_id and your user in signing_sa_members
+**1. Provision infrastructure** — go to **Actions → Secure File Transfer — Infrastructure → Run workflow**, choose `apply`.
 
-terraform init
-terraform apply
-```
-
-Note the two outputs:
+After the run, check the workflow logs for the two Terraform outputs:
 ```
 bucket_name      = "secure-transfer-a1b2c3d4"
 signing_sa_email = "secure-transfer-signer@my-project.iam.gserviceaccount.com"
 ```
 
-Install the Python dependencies once:
+**2. Install the Python dependencies** (once, on your local machine):
 ```bash
 cd scripts
 python -m venv .venv && source .venv/bin/activate
@@ -99,10 +109,7 @@ python transfer.py delete \
 
 ## Tear down
 
-```bash
-cd terraform
-terraform destroy
-```
+Go to **Actions → Secure File Transfer — Infrastructure → Run workflow**, choose `destroy`.
 
 All objects and infrastructure are removed.
 
