@@ -8,7 +8,8 @@ name: Cleanup — destroy expired workspaces
 
 on:
   schedule:
-    - cron: '0 * * * *'   # every hour
+    - cron: '0 6  * * *'   # 06:00 UTC
+    - cron: '0 18 * * *'   # 18:00 UTC
   workflow_dispatch:
     inputs:
       ttl_hours:

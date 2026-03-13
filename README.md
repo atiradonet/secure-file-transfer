@@ -103,7 +103,7 @@ Typing `destroy` in `confirm_destroy` is required — it prevents accidental tea
 
 ### Automatic workspace expiry
 
-Workspaces self-destruct automatically. A scheduled cleanup workflow runs every hour and destroys any workspace whose bucket is older than the TTL (default **36 hours**):
+Workspaces self-destruct automatically. A cleanup workflow runs twice daily (06:00 and 18:00 UTC) and destroys any workspace whose bucket is older than the TTL (default **36 hours**). Worst case: a workspace is torn down within 12 hours of its TTL expiring.
 
 | Layer | What happens | When |
 |-------|-------------|------|
