@@ -1,6 +1,14 @@
 # secure-file-transfer
 
-Disposable secure file sharing via GCS signed URLs — provision, upload, share, tear down.
+Instead of emailing attachments, using a shared drive, or spinning up a permanent file hosting service, this tool lets you create a private storage space on demand, drop a file in, and hand the customer a link that expires automatically. When the transfer is done, you tear the whole thing down — no lingering infrastructure, no ongoing cost, no data sitting around.
+
+Each transfer is isolated, so sharing a contract with Client A and a report with Client B are completely independent — separate storage, separate access, no cross-contamination.
+
+The security posture is intentional: files are never public, links expire (default one hour), and there is no permanent service account key that could be leaked or stolen. The moment the link expires or you tear down the workspace, access is gone.
+
+The operational overhead is minimal by design — one command to set up, one command to share, one command to clean up. The setup burden for someone new to the tool is also a single script.
+
+---
 
 Each transfer runs in its own isolated workspace with a dedicated private bucket. Infrastructure
 is provisioned on demand via a GitHub Actions pipeline and torn down when the transfer is complete.
