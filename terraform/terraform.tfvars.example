@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars and fill in your values.
+
+project_id          = "my-gcp-project"
+region              = "US"          # multi-region; use "us-central1" for a single region
+file_retention_days = 7
+
+# IAM members allowed to upload files and generate signed URLs.
+# Format: "user:alice@example.com" or "serviceAccount:sa@project.iam.gserviceaccount.com"
+signing_sa_members = [
+  "user:you@example.com",
+]
