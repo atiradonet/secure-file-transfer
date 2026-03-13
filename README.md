@@ -4,7 +4,7 @@ Instead of emailing attachments, using a shared drive, or spinning up a permanen
 
 Each transfer is isolated, so sharing a contract with Client A and a report with Client B are completely independent — separate storage, separate access, no cross-contamination.
 
-The security posture is intentional: files are never public, links expire (default one hour), and there is no permanent credential that could be leaked or stolen. The moment the link expires or you tear down the workspace, access is gone.
+The security posture is intentional: every file is AES-256 encrypted before it leaves your machine, files are never public, links expire (default one hour), and there is no permanent credential that could be leaked or stolen. The moment the link expires or you tear down the workspace, access is gone.
 
 The operational overhead is minimal by design — one command to set up, one command to share, one command to clean up. The setup burden for someone new to the tool is also a single script.
 
@@ -98,7 +98,7 @@ Xk9mP2rL...
 ────────────────────────────────────────────────────────────────────────
 ```
 
-Share the URL (and checksum) by one channel and the password by another. The recipient unzips with 7-Zip — see [Transferring a folder](#transferring-a-folder) for unzip instructions.
+Share the URL (and checksum) by one channel and the password by another. The recipient unzips with 7-Zip — see [Encryption and unzipping](#encryption-and-unzipping) for instructions.
 
 ### Provision + pack (folder)
 
@@ -107,7 +107,7 @@ gh workflow run terraform.yml -f action=apply -f workspace=acme-q1-report && \
 python scripts/transfer.py pack --workspace acme-q1-report --folder ./documents
 ```
 
-See [Transferring a folder](#transferring-a-folder) for the full output format and unzip instructions.
+See [Encryption and unzipping](#encryption-and-unzipping) for the full output format and unzip instructions.
 
 ### Tear down a workspace
 
@@ -163,15 +163,15 @@ Each gets its own bucket (`secure-transfer-<workspace>`) and can be torn down in
 
 ---
 
-## Transferring a folder
+## Encryption and unzipping
 
-Both `upload` and `pack` encrypt their payload with AES-256 before uploading. Use `pack` when you have multiple files — it zips the entire folder (preserving structure) before encrypting:
+Both `upload` and `pack` wrap their payload in an AES-256 encrypted zip before uploading. Use `pack` when you have multiple files — it zips the entire folder (preserving directory structure) before encrypting:
 
 ```bash
 python scripts/transfer.py pack --workspace acme-q1-report --folder ./documents
 ```
 
-The output is split deliberately — share the URL by email and the password by a separate channel (e.g. IM):
+The output is identical for both commands — split deliberately so you can share the URL and password via different channels (e.g. email + IM):
 
 ```
 ========================================================================
@@ -209,8 +209,8 @@ On Windows, 7-Zip or WinZip work. On Linux, `7z` (from `p7zip-full`) or `unzip` 
 # List files currently in a workspace's bucket
 python scripts/transfer.py list --workspace acme-q1-report
 
-# Delete a specific file before it expires
-python scripts/transfer.py delete --workspace acme-q1-report --object report.pdf --confirm report.pdf
+# Delete a specific file before it expires (note: uploaded files are stored as .zip)
+python scripts/transfer.py delete --workspace acme-q1-report --object report.pdf.zip --confirm report.pdf.zip
 
 # Override the default 1h expiry on upload (max 24h)
 python scripts/transfer.py upload --workspace acme-q1-report --file report.pdf --expiry 4h
