@@ -103,8 +103,9 @@ func cmdPack(ctx context.Context, args []string) error {
 	workspace := fs.String("workspace", "", "Workspace name (required)")
 	folder := fs.String("folder", "", "Local folder path to pack and upload (required)")
 	expiry := fs.String("expiry", "1h", "URL lifetime: m/h/d (max 24h)")
+	prefix := fs.String("prefix", "", "Optional folder prefix inside the bucket")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: transfer pack --workspace NAME --folder PATH [--expiry DURATION]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: transfer pack --workspace NAME --folder PATH [--expiry DURATION] [--prefix PREFIX]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -127,7 +128,7 @@ func cmdPack(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return transfer(ctx, *workspace, *folder, "", d)
+	return transfer(ctx, *workspace, *folder, *prefix, d)
 }
 
 // cmdList lists objects in the workspace bucket.
