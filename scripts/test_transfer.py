@@ -3,9 +3,8 @@
 import datetime
 import argparse
 import string
-import zipfile
 import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 import sys
 import os
 
@@ -492,7 +491,7 @@ class TestCmdList:
     ):
         mock_default.return_value = (MagicMock(), "proj")
         blob = MagicMock()
-        blob.name = "report.pdf"
+        blob.name = "report.pdf.zip"
         blob.size = 1024
         blob.updated = datetime.datetime(2026, 3, 1, 12, 0, tzinfo=datetime.timezone.utc)
         mock_client_cls.return_value.bucket.return_value.list_blobs.return_value = [blob]
@@ -500,7 +499,7 @@ class TestCmdList:
         transfer.cmd_list(self._make_args())
 
         out = capsys.readouterr().out
-        assert "report.pdf" in out
+        assert "report.pdf.zip" in out
         assert "1,024" in out
 
     @patch("transfer.google.auth.default")
@@ -557,7 +556,7 @@ class TestCmdDelete:
         return args
 
     def test_mismatched_confirm_exits(self):
-        args = self._make_args("report.pdf", confirm="wrong.pdf")
+        args = self._make_args("report.pdf.zip", confirm="wrong.pdf.zip")
         with pytest.raises(SystemExit):
             transfer.cmd_delete(args)
 
@@ -568,10 +567,10 @@ class TestCmdDelete:
         mock_blob = MagicMock()
         mock_client_cls.return_value.bucket.return_value.blob.return_value = mock_blob
 
-        transfer.cmd_delete(self._make_args("report.pdf"))
+        transfer.cmd_delete(self._make_args("report.pdf.zip"))
 
         mock_blob.delete.assert_called_once()
-        assert "report.pdf" in capsys.readouterr().out
+        assert "report.pdf.zip" in capsys.readouterr().out
 
     @patch("transfer.google.auth.default")
     @patch("transfer.storage.Client")
@@ -579,6 +578,6 @@ class TestCmdDelete:
         mock_default.return_value = (MagicMock(), "proj")
         mock_client_cls.return_value.bucket.return_value.blob.return_value = MagicMock()
 
-        transfer.cmd_delete(self._make_args("report.pdf"))
+        transfer.cmd_delete(self._make_args("report.pdf.zip"))
 
         mock_client_cls.return_value.bucket.assert_called_with("secure-transfer-test-ws")
