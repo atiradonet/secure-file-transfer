@@ -67,42 +67,40 @@ pip install -r requirements.txt
 
 ### Upload and get a shareable URL
 
+The workspace name is the only identifier needed — bucket and signing SA are derived automatically.
+
 ```bash
-python transfer.py upload \
-    --bucket      secure-transfer-a1b2c3d4 \
-    --signing-sa  secure-transfer-signer@my-project.iam.gserviceaccount.com \
-    --file        report.pdf \
-    --expiry      48h
+python transfer.py upload --workspace acme-q1-report --file report.pdf --expiry 1h
 ```
 
 ```
-Uploading  report.pdf  →  gs://secure-transfer-a1b2c3d4/report.pdf
+Uploading  report.pdf  →  gs://secure-transfer-acme-q1-report/report.pdf
 Upload complete.
 
 ========================================================================
 Shareable URL (expires 2025-06-15 14:32 UTC):
 
-https://storage.googleapis.com/secure-transfer-a1b2c3d4/report.pdf?X-Goog-...
+https://storage.googleapis.com/secure-transfer-acme-q1-report/report.pdf?X-Goog-...
 ========================================================================
 ```
 
-Send that URL to your customer. It expires automatically at the requested time.
+Or as a single chained command:
+
+```bash
+gh workflow run terraform.yml -f action=apply -f workspace=acme-q1-report && \
+python transfer.py upload --workspace acme-q1-report --file report.pdf --expiry 1h
+```
 
 ### List files in the bucket
 
 ```bash
-python transfer.py list \
-    --bucket     secure-transfer-a1b2c3d4 \
-    --signing-sa secure-transfer-signer@...
+python transfer.py list --workspace acme-q1-report
 ```
 
 ### Delete a file early
 
 ```bash
-python transfer.py delete \
-    --bucket     secure-transfer-a1b2c3d4 \
-    --signing-sa secure-transfer-signer@... \
-    --object     report.pdf
+python transfer.py delete --workspace acme-q1-report --object report.pdf
 ```
 
 ---
