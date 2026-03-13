@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -93,7 +94,9 @@ func (r *realStorageClient) DeleteObject(ctx context.Context, bucket, object str
 }
 
 // buildSignedURLOptions returns SignedURLOptions that use IAM signBlob.
-func buildSignedURLOptions(ctx context.Context, signingServiceAccount string, expiry time.Duration, method string) (*storage.SignedURLOptions, error) {
+// objectName is used to set Content-Disposition so the browser downloads
+// the file under the correct name instead of opening it inline.
+func buildSignedURLOptions(ctx context.Context, signingServiceAccount string, expiry time.Duration, method, objectName, contentType string) (*storage.SignedURLOptions, error) {
 	iamSvc, err := iamv1.NewService(ctx, option.WithScopes("https://www.googleapis.com/auth/cloud-platform"))
 	if err != nil {
 		return nil, fmt.Errorf("creating IAM service: %w", err)
@@ -115,6 +118,13 @@ func buildSignedURLOptions(ctx context.Context, signingServiceAccount string, ex
 		Method:  method,
 		Expires: time.Now().Add(expiry),
 		Scheme:  storage.SigningSchemeV4,
+		// V4 signed URLs enforce response headers via query parameters.
+		// This makes the browser download the file with the correct name
+		// instead of opening it inline.
+		QueryParameters: url.Values{
+			"response-content-disposition": []string{fmt.Sprintf(`attachment; filename="%s"`, objectName)},
+			"response-content-type":        []string{contentType},
+		},
 	}, nil
 }
 

@@ -20,6 +20,7 @@ type mockStorageClient struct {
 	uploadErr           error
 	signedURL           string
 	signErr             error
+	signedURLOpts       *storage.SignedURLOptions
 	listedObjects       []ObjectInfo
 	listErr             error
 	deletedBucket       string
@@ -35,6 +36,7 @@ func (m *mockStorageClient) Upload(ctx context.Context, bucket, object, contentT
 }
 
 func (m *mockStorageClient) SignedURL(bucket, object string, opts *storage.SignedURLOptions) (string, error) {
+	m.signedURLOpts = opts
 	if m.signErr != nil {
 		return "", m.signErr
 	}
@@ -169,6 +171,30 @@ func TestRunUpload(t *testing.T) {
 		want := "folder/file.txt.zip"
 		if sc.uploadedObject != want {
 			t.Errorf("got object name %q, want %q", sc.uploadedObject, want)
+		}
+	})
+
+	t.Run("signed URL has content-disposition attachment", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		f := filepath.Join(tmpDir, "report.pdf")
+		os.WriteFile(f, []byte("data"), 0644)
+
+		sc := &mockStorageClient{}
+		captureOutput(func() {
+			runUpload(ctx, sc, "test-project", "test-ws", f, "1h", "")
+		})
+
+		if sc.signedURLOpts == nil {
+			t.Fatal("SignedURL was not called")
+		}
+		wantDisp := `attachment; filename="report.pdf.zip"`
+		gotDisp := sc.signedURLOpts.QueryParameters.Get("response-content-disposition")
+		if gotDisp != wantDisp {
+			t.Errorf("response-content-disposition = %q, want %q", gotDisp, wantDisp)
+		}
+		gotType := sc.signedURLOpts.QueryParameters.Get("response-content-type")
+		if gotType != "application/zip" {
+			t.Errorf("response-content-type = %q, want application/zip", gotType)
 		}
 	})
 }

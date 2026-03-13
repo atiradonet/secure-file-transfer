@@ -74,7 +74,7 @@ func runPack(ctx context.Context, sc StorageClient, project, workspace, folder, 
 	}
 	fmt.Printf("Upload complete.  SHA-256: %s\n", sha256sum)
 
-	urlOpts, err := buildSignedURLOptions(ctx, signingServiceAccount, expiry, "GET")
+	urlOpts, err := buildSignedURLOptions(ctx, signingServiceAccount, expiry, "GET", zipName, "application/zip")
 	if err != nil {
 		return err
 	}

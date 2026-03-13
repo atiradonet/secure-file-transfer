@@ -34,8 +34,8 @@ func TestRunList(t *testing.T) {
 		if !strings.Contains(out, "report.pdf.zip") {
 			t.Errorf("expected 'report.pdf.zip' in output, got: %s", out)
 		}
-		if !strings.Contains(out, "1024") {
-			t.Errorf("expected size '1024' in output, got: %s", out)
+		if !strings.Contains(out, "1,024") {
+			t.Errorf("expected size '1,024' in output, got: %s", out)
 		}
 	})
 
@@ -48,6 +48,26 @@ func TestRunList(t *testing.T) {
 			t.Errorf("expected prefix 'invoices/', got %q", scCustom.capturedPrefix)
 		}
 	})
+}
+
+func TestFormatSize(t *testing.T) {
+	cases := []struct {
+		in   int64
+		want string
+	}{
+		{0, "0"},
+		{999, "999"},
+		{1000, "1,000"},
+		{1024, "1,024"},
+		{1048576, "1,048,576"},
+		{1073741824, "1,073,741,824"},
+	}
+	for _, c := range cases {
+		got := formatSize(c.in)
+		if got != c.want {
+			t.Errorf("formatSize(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
 }
 
 // prefixCaptureMock wraps mockStorageClient and records the prefix argument.
