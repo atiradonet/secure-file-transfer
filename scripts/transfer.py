@@ -204,6 +204,11 @@ def main():
             "Error: no Application Default Credentials found.\n"
             "Run:  gcloud auth application-default login"
         )
+    except google.auth.exceptions.TransportError:
+        sys.exit(
+            "Error: IAM signing request failed. This is usually an IAM propagation delay — "
+            "wait a minute and retry, or verify your account is in GCP_SIGNING_MEMBERS."
+        )
     except google.api_core.exceptions.NotFound:
         sys.exit("Error: resource not found. Check workspace name and that infrastructure has been provisioned.")
     except google.api_core.exceptions.PermissionDenied:

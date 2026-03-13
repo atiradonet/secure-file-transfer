@@ -102,9 +102,9 @@ wait_for_run "$RUN_ID"
 ok "Infrastructure provisioned"
 info "Bucket: secure-transfer-${WORKSPACE}"
 
-# IAM bindings can take up to ~60 s to propagate after terraform apply.
-info "Waiting 60 s for IAM propagation..."
-sleep 60
+# IAM bindings can take up to ~90 s to propagate after terraform apply.
+info "Waiting 90 s for IAM propagation..."
+sleep 90
 
 # ---------------------------------------------------------------------------
 # Step 3 — Upload and get signed URL
