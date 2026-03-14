@@ -1,14 +1,20 @@
 package main
 
 import (
-	"io"
+	"archive/zip"
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha256"
+	"encoding/base64"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/yeka/zip"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 // ---------------------------------------------------------------------------
@@ -162,140 +168,250 @@ func TestGeneratePassword(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// createEncryptedZip
+// createSecureBundle — helpers
 // ---------------------------------------------------------------------------
 
-// readZipNames opens an AES-256 encrypted zip and returns the stored file names.
-func readZipNames(t *testing.T, zipPath, password string) []string {
+// extractHTMLVar parses a JS const assignment from the HTML bundle.
+// It matches: const NAME="VALUE"; or const NAME=VALUE; (unquoted for JSON).
+var extractRE = regexp.MustCompile(`const ([A-Z_]+)=("(?:[^"\\]|\\.)*"|[^;]+);`)
+
+func extractVars(t *testing.T, html string) map[string]string {
 	t.Helper()
-	r, err := zip.OpenReader(zipPath)
-	if err != nil {
-		t.Fatalf("opening zip %q: %v", zipPath, err)
+	m := make(map[string]string)
+	for _, match := range extractRE.FindAllStringSubmatch(html, -1) {
+		val := match[2]
+		// Strip surrounding quotes for string literals.
+		if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+			val = val[1 : len(val)-1]
+		}
+		m[match[1]] = val
 	}
-	defer r.Close()
-	var names []string
-	for _, f := range r.File {
-		f.SetPassword(password)
-		names = append(names, f.Name)
-	}
-	return names
+	return m
 }
 
-func TestCreateEncryptedZip(t *testing.T) {
-	t.Run("single file stored at root with correct name", func(t *testing.T) {
+// roundtripDecrypt decrypts AES-256-GCM ciphertext using the same parameters
+// as the HTML bundle (PBKDF2-SHA256, 100 000 iterations). Returns plaintext.
+func roundtripDecrypt(t *testing.T, saltB64, nonceB64, dataB64, password string) []byte {
+	t.Helper()
+	salt, err := base64.StdEncoding.DecodeString(saltB64)
+	if err != nil {
+		t.Fatalf("decoding salt: %v", err)
+	}
+	nonce, err := base64.StdEncoding.DecodeString(nonceB64)
+	if err != nil {
+		t.Fatalf("decoding nonce: %v", err)
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(dataB64)
+	if err != nil {
+		t.Fatalf("decoding ciphertext: %v", err)
+	}
+
+	key := pbkdf2.Key([]byte(password), salt, kdfIterations, 32, sha256.New)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("creating cipher: %v", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("creating GCM: %v", err)
+	}
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		t.Fatalf("decrypting: %v", err)
+	}
+	return plaintext
+}
+
+// ---------------------------------------------------------------------------
+// createSecureBundle — tests
+// ---------------------------------------------------------------------------
+
+func TestCreateSecureBundle(t *testing.T) {
+	t.Run("single file: decryptedName equals filename", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		src := filepath.Join(tmpDir, "report.pdf")
-		if err := os.WriteFile(src, []byte("data"), 0644); err != nil {
+		if err := os.WriteFile(src, []byte("pdf content"), 0644); err != nil {
 			t.Fatal(err)
 		}
-		dest := filepath.Join(tmpDir, "out.zip")
-		if err := createEncryptedZip(src, dest, "password123"); err != nil {
-			t.Fatalf("createEncryptedZip: %v", err)
+		var buf bytes.Buffer
+		name, err := createSecureBundle(src, &buf, "testpassword")
+		if err != nil {
+			t.Fatalf("createSecureBundle: %v", err)
 		}
-		names := readZipNames(t, dest, "password123")
-		if len(names) != 1 {
-			t.Fatalf("expected 1 file in zip, got %d: %v", len(names), names)
-		}
-		if names[0] != "report.pdf" {
-			t.Errorf("expected file name 'report.pdf', got %q", names[0])
+		if name != "report.pdf" {
+			t.Errorf("decryptedName = %q, want %q", name, "report.pdf")
 		}
 	})
 
-	t.Run("folder with subfolder preserves structure", func(t *testing.T) {
+	t.Run("single file: HTML output contains all placeholders substituted", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "data.csv")
+		if err := os.WriteFile(src, []byte("a,b,c"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		if _, err := createSecureBundle(src, &buf, "pw"); err != nil {
+			t.Fatalf("createSecureBundle: %v", err)
+		}
+		html := buf.String()
+		for _, placeholder := range []string{"{{TITLE}}", "{{FILENAME_JS}}", "{{SALT}}", "{{NONCE}}", "{{DATA}}"} {
+			if strings.Contains(html, placeholder) {
+				t.Errorf("HTML still contains unsubstituted placeholder %q", placeholder)
+			}
+		}
+	})
+
+	t.Run("single file: roundtrip decrypt recovers original content", func(t *testing.T) {
+		content := []byte("the quick brown fox jumps over the lazy dog")
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "message.txt")
+		if err := os.WriteFile(src, content, 0644); err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		if _, err := createSecureBundle(src, &buf, "mypassword"); err != nil {
+			t.Fatalf("createSecureBundle: %v", err)
+		}
+		vars := extractVars(t, buf.String())
+		for _, k := range []string{"SALT", "NONCE", "DATA"} {
+			if vars[k] == "" {
+				t.Fatalf("JS variable %q not found in HTML", k)
+			}
+		}
+		plaintext := roundtripDecrypt(t, vars["SALT"], vars["NONCE"], vars["DATA"], "mypassword")
+		if !bytes.Equal(plaintext, content) {
+			t.Errorf("roundtrip failed: got %q, want %q", plaintext, content)
+		}
+	})
+
+	t.Run("single file: wrong password fails to decrypt", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "secret.bin")
+		if err := os.WriteFile(src, []byte("secret"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		if _, err := createSecureBundle(src, &buf, "correctpassword"); err != nil {
+			t.Fatalf("createSecureBundle: %v", err)
+		}
+		vars := extractVars(t, buf.String())
+
+		salt, _ := base64.StdEncoding.DecodeString(vars["SALT"])
+		nonce, _ := base64.StdEncoding.DecodeString(vars["NONCE"])
+		ciphertext, _ := base64.StdEncoding.DecodeString(vars["DATA"])
+		key := pbkdf2.Key([]byte("wrongpassword"), salt, kdfIterations, 32, sha256.New)
+		block, _ := aes.NewCipher(key)
+		gcm, _ := cipher.NewGCM(block)
+		_, err := gcm.Open(nil, nonce, ciphertext, nil)
+		if err == nil {
+			t.Error("expected decryption to fail with wrong password")
+		}
+	})
+
+	t.Run("directory: decryptedName ends with .zip", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		src := filepath.Join(tmpDir, "docs")
-		sub := filepath.Join(src, "invoices")
+		if err := os.MkdirAll(src, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(src, "readme.txt"), []byte("hi"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		name, err := createSecureBundle(src, &buf, "pw")
+		if err != nil {
+			t.Fatalf("createSecureBundle: %v", err)
+		}
+		if name != "docs.zip" {
+			t.Errorf("decryptedName = %q, want %q", name, "docs.zip")
+		}
+	})
+
+	t.Run("directory: roundtrip recovers zip containing expected files", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "project")
+		sub := filepath.Join(src, "subdir")
 		if err := os.MkdirAll(sub, 0755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(sub, "inv001.pdf"), []byte("x"), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(src, "top.txt"), []byte("top"), 0644); err != nil {
 			t.Fatal(err)
 		}
-		dest := filepath.Join(tmpDir, "out.zip")
-		if err := createEncryptedZip(src, dest, "password123"); err != nil {
-			t.Fatalf("createEncryptedZip: %v", err)
+		if err := os.WriteFile(filepath.Join(sub, "nested.txt"), []byte("nested"), 0644); err != nil {
+			t.Fatal(err)
 		}
-		names := readZipNames(t, dest, "password123")
-		found := false
-		for _, n := range names {
-			if strings.Contains(n, "invoices/inv001.pdf") || strings.Contains(n, "invoices\\inv001.pdf") {
-				found = true
-				break
+
+		var buf bytes.Buffer
+		if _, err := createSecureBundle(src, &buf, "zippass"); err != nil {
+			t.Fatalf("createSecureBundle: %v", err)
+		}
+		vars := extractVars(t, buf.String())
+		zipBytes := roundtripDecrypt(t, vars["SALT"], vars["NONCE"], vars["DATA"], "zippass")
+
+		zr, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+		if err != nil {
+			t.Fatalf("opening decrypted zip: %v", err)
+		}
+		names := make(map[string]bool)
+		for _, f := range zr.File {
+			names[f.Name] = true
+		}
+		for _, want := range []string{"project/top.txt", "project/subdir/nested.txt"} {
+			if !names[want] {
+				t.Errorf("expected %q in zip, got: %v", want, names)
 			}
 		}
-		if !found {
-			t.Errorf("expected invoices/inv001.pdf in zip, got: %v", names)
-		}
-	})
-
-	t.Run("wrong password returns error on read", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		src := filepath.Join(tmpDir, "secret.txt")
-		if err := os.WriteFile(src, []byte("secret content"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		dest := filepath.Join(tmpDir, "out.zip")
-		if err := createEncryptedZip(src, dest, "correctpassword"); err != nil {
-			t.Fatalf("createEncryptedZip: %v", err)
-		}
-
-		r, err := zip.OpenReader(dest)
-		if err != nil {
-			t.Fatalf("opening zip: %v", err)
-		}
-		defer r.Close()
-
-		if len(r.File) == 0 {
-			t.Fatal("expected at least one file in zip")
-		}
-		f := r.File[0]
-		f.SetPassword("wrongpassword")
-		rc, err := f.Open()
-		if err != nil {
-			// Error at open is acceptable for wrong password.
-			return
-		}
-		defer rc.Close()
-		buf := make([]byte, 64)
-		_, readErr := io.ReadFull(rc, buf)
-		if readErr == nil {
-			t.Error("expected error reading with wrong password — AES-256 authentication should fail")
-		}
-		// Either Open or Read must fail with the wrong password for AES-256.
 	})
 }
 
 // ---------------------------------------------------------------------------
-// fileSHA256
+// packToZip
 // ---------------------------------------------------------------------------
 
-func TestFileSHA256(t *testing.T) {
-	t.Run("known content produces expected digest", func(t *testing.T) {
-		f := filepath.Join(t.TempDir(), "data.txt")
-		if err := os.WriteFile(f, []byte("hello"), 0644); err != nil {
+func TestPackToZip(t *testing.T) {
+	t.Run("sorted walk preserves deterministic order", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "mydir")
+		if err := os.MkdirAll(src, 0755); err != nil {
 			t.Fatal(err)
 		}
-		// echo -n "hello" | sha256sum → 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
-		want := "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-		got, err := fileSHA256(f)
-		if err != nil {
-			t.Fatalf("fileSHA256: %v", err)
+		for _, name := range []string{"c.txt", "a.txt", "b.txt"} {
+			if err := os.WriteFile(filepath.Join(src, name), []byte(name), 0644); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if got != want {
-			t.Errorf("got %q, want %q", got, want)
+
+		var buf1, buf2 bytes.Buffer
+		if err := packToZip(src, &buf1); err != nil {
+			t.Fatalf("packToZip run 1: %v", err)
+		}
+		if err := packToZip(src, &buf2); err != nil {
+			t.Fatalf("packToZip run 2: %v", err)
+		}
+		if !bytes.Equal(buf1.Bytes(), buf2.Bytes()) {
+			t.Error("two packToZip runs produced different bytes (not deterministic)")
 		}
 	})
 
-	t.Run("different content produces different digest", func(t *testing.T) {
-		dir := t.TempDir()
-		f1 := filepath.Join(dir, "a.txt")
-		f2 := filepath.Join(dir, "b.txt")
-		os.WriteFile(f1, []byte("aaa"), 0644)
-		os.WriteFile(f2, []byte("bbb"), 0644)
-		h1, _ := fileSHA256(f1)
-		h2, _ := fileSHA256(f2)
-		if h1 == h2 {
-			t.Error("expected different digests for different files")
+	t.Run("output is a valid zip", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "stuff")
+		if err := os.MkdirAll(src, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("hello"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		if err := packToZip(src, &buf); err != nil {
+			t.Fatalf("packToZip: %v", err)
+		}
+		zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+		if err != nil {
+			t.Fatalf("invalid zip output: %v", err)
+		}
+		if len(zr.File) != 1 {
+			t.Errorf("expected 1 file in zip, got %d", len(zr.File))
 		}
 	})
 }

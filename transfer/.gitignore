@@ -1,3 +1,5 @@
 # Go build artifacts
 transfer
+transfer-linux-amd64
+transfer-windows-amd64.exe
 transfer-go-tmp-*

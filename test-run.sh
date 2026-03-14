@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test-run.sh — end-to-end walkthrough of the secure-file-transfer workflow.
 #
-# Runs through: provision → upload (single file) → pack (folder) → verify → tear down
+# Runs through: provision → upload (single file + JSON validation) → pack (with prefix) → verify → tear down
 # Takes about 8-10 minutes.
 
 set -euo pipefail
@@ -90,20 +90,37 @@ if ! gcloud auth application-default print-access-token &>/dev/null; then
 fi
 ok "GCP Application Default Credentials found"
 
+# Resolve and export the project so the Go binary finds it regardless of
+# whether it is embedded in ADC. GOOGLE_CLOUD_PROJECT is the standard GCP
+# env var recognised by all GCP SDKs.
+GOOGLE_CLOUD_PROJECT="$(gcloud config get-value project 2>/dev/null)"
+if [[ -z "$GOOGLE_CLOUD_PROJECT" ]]; then
+  echo "Error: GCP project not set. Run: gcloud config set project <project_id>"
+  exit 1
+fi
+export GOOGLE_CLOUD_PROJECT
+ok "GCP project: $GOOGLE_CLOUD_PROJECT"
+
 if ! gh auth status &>/dev/null; then
   echo "Error: gh CLI not authenticated. Run: gh auth login"
   exit 1
 fi
 ok "GitHub CLI authenticated"
 
-# Build the Go binary
+if ! command -v jq &>/dev/null; then
+  echo "Error: jq not found in PATH. Install with: brew install jq"
+  exit 1
+fi
+ok "jq found"
+
+# Build the Go binary via the Makefile (CGO_ENABLED=0 static binary).
 TRANSFER_BIN="$(dirname "$0")/transfer/transfer"
 step "Building Go binary"
 if ! command -v go &>/dev/null; then
   echo "Error: go not found in PATH"
   exit 1
 fi
-(cd "$(dirname "$0")/transfer" && GOMODCACHE="${TMPDIR:-/tmp}/gomod-transfer" go build -o transfer .)
+(cd "$(dirname "$0")/transfer" && GOMODCACHE="${TMPDIR:-/tmp}/gomod-transfer" make build)
 ok "Binary built: $TRANSFER_BIN"
 
 # ---------------------------------------------------------------------------
@@ -150,21 +167,47 @@ UPLOAD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   --file "$TEST_FILE" \
   --expiry 30m
 
+# Validate --json output non-interactively.
+# Use --prefix json-test so this upload lands at a different object path and
+# does not overwrite the object the interactive URL above points to.
+info "Testing --json flag..."
+JSON_OUT=$("$TRANSFER_BIN" upload \
+  --workspace "$WORKSPACE" \
+  --file "$TEST_FILE" \
+  --prefix json-test \
+  --expiry 30m \
+  --json)
+for field in url filename sha256 expires_at password; do
+  val=$(echo "$JSON_OUT" | jq -r ".$field")
+  if [[ -z "$val" || "$val" == "null" ]]; then
+    echo "Error: --json output missing field '$field'"
+    exit 1
+  fi
+done
+ok "--json output is valid (url, filename, sha256, expires_at, password present)"
+
 echo ""
-ask "Download the zip above, enter the password, confirm the file contains the expected text — then press Enter"
+ask "Open the URL printed above in a browser, enter the password, confirm the file downloads and contains the expected text — then press Enter"
 
 # ---------------------------------------------------------------------------
-# Step 4 — Pack folder
+# Step 4 — Pack folder (with --prefix to exercise subfolder routing)
 # ---------------------------------------------------------------------------
 step "4 / 5  Pack folder"
 
 "$TRANSFER_BIN" pack \
   --workspace "$WORKSPACE" \
   --folder "$TEST_DIR" \
+  --prefix test \
   --expiry 30m
 
 echo ""
-ask "Download the zip above, enter the password, verify all 3 files and the subfolder — then press Enter"
+ask "Open the URL above in a browser, enter the password, verify the zip downloads and contains all 3 files with the subfolder — then press Enter"
+
+# Verify the object was stored under the prefix.
+info "Verifying object stored under prefix 'test/'..."
+"$TRANSFER_BIN" list --workspace "$WORKSPACE" | grep "^test/" \
+  || { echo "Error: no objects found under 'test/' prefix"; exit 1; }
+ok "Object correctly stored under 'test/' prefix"
 
 # ---------------------------------------------------------------------------
 # Step 5 — Tear down

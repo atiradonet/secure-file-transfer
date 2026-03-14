@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"path/filepath"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -16,6 +15,10 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
+
+// gcpProjectEnvVar allows callers to override ADC project discovery,
+// useful in CI or multi-project environments.
+const gcpProjectEnvVar = "TRANSFER_GCP_PROJECT"
 
 type objectInfo struct {
 	Name    string
@@ -30,35 +33,40 @@ func workspaceResources(workspace, project string) (bucket, signerSA string) {
 		"st-signer-" + workspace + "@" + project + ".iam.gserviceaccount.com"
 }
 
-// gcpProject reads the GCP project ID from Application Default Credentials.
+// gcpProject returns the GCP project ID using the following precedence:
+//  1. TRANSFER_GCP_PROJECT env var (tool-specific override)
+//  2. GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT env vars (standard GCP convention)
+//  3. Project embedded in Application Default Credentials
 func gcpProject(ctx context.Context) (string, error) {
+	for _, env := range []string{gcpProjectEnvVar, "GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT"} {
+		if p := os.Getenv(env); p != "" {
+			return p, nil
+		}
+	}
 	creds, err := google.FindDefaultCredentials(ctx, "https://www.googleapis.com/auth/cloud-platform")
 	if err != nil {
-		return "", fmt.Errorf("no Application Default Credentials found — run: gcloud auth application-default login")
+		return "", fmt.Errorf("no Application Default Credentials found — run: gcloud auth application-default login\n"+
+			"Or set %s=<project_id> to skip ADC entirely", gcpProjectEnvVar)
 	}
 	if creds.ProjectID == "" {
-		return "", fmt.Errorf("GCP project not set in ADC — run: gcloud config set project <project_id>")
+		return "", fmt.Errorf("GCP project not set — run: gcloud config set project <project_id>\n" +
+			"Or set %s=<project_id> to skip ADC project lookup", gcpProjectEnvVar)
 	}
 	return creds.ProjectID, nil
 }
 
-// gcsUpload uploads the file at localPath to gs://bucket/object.
-func gcsUpload(ctx context.Context, bucket, object, localPath string) error {
+// gcsUpload streams r to gs://bucket/object.
+// The caller owns r and is responsible for closing it.
+func gcsUpload(ctx context.Context, bucket, object string, r io.Reader) error {
 	client, err := storage.NewClient(ctx)
 	if err != nil {
 		return fmt.Errorf("creating storage client: %w", err)
 	}
 	defer client.Close()
 
-	f, err := os.Open(localPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
 	wc := client.Bucket(bucket).Object(object).NewWriter(ctx)
-	wc.ContentType = "application/zip"
-	if _, err := io.Copy(wc, f); err != nil {
+	wc.ContentType = "text/html; charset=utf-8"
+	if _, err := io.Copy(wc, r); err != nil {
 		_ = wc.Close()
 		return err
 	}
@@ -91,11 +99,11 @@ func gcsSignURL(ctx context.Context, bucket, object, signerSA string, expiry tim
 		Method:  "GET",
 		Expires: time.Now().Add(expiry),
 		Scheme:  storage.SigningSchemeV4,
-		// V4 signed URLs enforce response headers via query parameters so
-		// the browser downloads the file under the correct name.
+		// V4 signed URLs enforce response headers via query parameters.
+		// Serving inline (no content-disposition) causes the browser to render
+		// the HTML decrypt page directly — no local file download required.
 		QueryParameters: url.Values{
-			"response-content-disposition": []string{fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(object))},
-			"response-content-type":        []string{"application/zip"},
+			"response-content-type": []string{"text/html; charset=utf-8"},
 		},
 	}
 

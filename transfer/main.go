@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,7 +23,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
 	var err error
 
 	switch os.Args[1] {
@@ -71,8 +74,9 @@ func cmdUpload(ctx context.Context, args []string) error {
 	file := fs.String("file", "", "Local file path (required)")
 	expiry := fs.String("expiry", "1h", "URL lifetime: m/h/d (max 24h)")
 	prefix := fs.String("prefix", "", "Optional folder prefix inside the bucket")
+	jsonOut := fs.Bool("json", false, "Print result as JSON (for scripting)")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: transfer upload --workspace NAME --file PATH [--expiry DURATION] [--prefix PREFIX]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: transfer upload --workspace NAME --file PATH [--expiry DURATION] [--prefix PREFIX] [--json]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -94,7 +98,7 @@ func cmdUpload(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return transfer(ctx, *workspace, *file, *prefix, d)
+	return transfer(ctx, *workspace, *file, *prefix, d, *jsonOut)
 }
 
 // cmdPack parses flags for the pack subcommand and calls transfer().
@@ -104,8 +108,9 @@ func cmdPack(ctx context.Context, args []string) error {
 	folder := fs.String("folder", "", "Local folder path to pack and upload (required)")
 	expiry := fs.String("expiry", "1h", "URL lifetime: m/h/d (max 24h)")
 	prefix := fs.String("prefix", "", "Optional folder prefix inside the bucket")
+	jsonOut := fs.Bool("json", false, "Print result as JSON (for scripting)")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: transfer pack --workspace NAME --folder PATH [--expiry DURATION] [--prefix PREFIX]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: transfer pack --workspace NAME --folder PATH [--expiry DURATION] [--prefix PREFIX] [--json]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -128,7 +133,7 @@ func cmdPack(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return transfer(ctx, *workspace, *folder, *prefix, d)
+	return transfer(ctx, *workspace, *folder, *prefix, d, *jsonOut)
 }
 
 // cmdList lists objects in the workspace bucket.
@@ -215,9 +220,9 @@ func cmdDelete(ctx context.Context, args []string) error {
 }
 
 // transfer is the shared workflow for upload and pack:
-// encrypt → upload → sign → print result.
+// encrypt → stream-upload (hashing in-flight) → sign → print result.
 // source may be a file (upload) or a directory (pack).
-func transfer(ctx context.Context, workspace, source, prefix string, expiry time.Duration) error {
+func transfer(ctx context.Context, workspace, source, prefix string, expiry time.Duration, jsonOut bool) error {
 	project, err := gcpProject(ctx)
 	if err != nil {
 		return err
@@ -229,21 +234,12 @@ func transfer(ctx context.Context, workspace, source, prefix string, expiry time
 		return fmt.Errorf("generating password: %w", err)
 	}
 
-	zipName := filepath.Base(source) + ".zip"
-	var objectName string
-	if prefix != "" {
-		objectName = strings.TrimRight(prefix, "/") + "/" + zipName
-	} else {
-		objectName = zipName
+	// Progress messages go to stderr when --json is set so that stdout is
+	// clean JSON that can be piped directly to jq or other tools.
+	progress := os.Stdout
+	if jsonOut {
+		progress = os.Stderr
 	}
-
-	tmpDir, err := os.MkdirTemp("", "transfer-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmpDir)
-
-	zipPath := filepath.Join(tmpDir, zipName)
 
 	// Use "Packing" for folders, "Encrypting" for files.
 	info, err := os.Stat(source)
@@ -251,41 +247,75 @@ func transfer(ctx context.Context, workspace, source, prefix string, expiry time
 		return err
 	}
 	if info.IsDir() {
-		fmt.Printf("Packing  %s  →  %s  (AES-256)\n", source, zipName)
+		fmt.Fprintf(progress, "Packing  %s  (AES-256-GCM)\n", source)
 	} else {
-		fmt.Printf("Encrypting  %s  →  %s  (AES-256)\n", source, zipName)
+		fmt.Fprintf(progress, "Encrypting  %s  (AES-256-GCM)\n", source)
 	}
 
-	if err := createEncryptedZip(source, zipPath, password); err != nil {
-		return fmt.Errorf("creating encrypted zip: %w", err)
-	}
-
-	checksum, err := fileSHA256(zipPath)
+	// Write the self-contained HTML bundle to a temp file.
+	// createSecureBundle returns the decrypted filename so we can name the
+	// HTML object correctly (single file: report.pdf.html, folder: docs.zip.html).
+	tmpDir, err := os.MkdirTemp("", "transfer-*")
 	if err != nil {
 		return err
 	}
+	defer os.RemoveAll(tmpDir)
 
-	fmt.Printf("Uploading  %s  →  gs://%s/%s\n", zipName, bucket, objectName)
-	if err := gcsUpload(ctx, bucket, objectName, zipPath); err != nil {
+	bundleFile, err := os.CreateTemp(tmpDir, "*.html")
+	if err != nil {
+		return err
+	}
+	decryptedName, err := createSecureBundle(source, bundleFile, password)
+	if err != nil {
+		bundleFile.Close()
+		return fmt.Errorf("creating secure bundle: %w", err)
+	}
+	if err := bundleFile.Close(); err != nil {
+		return fmt.Errorf("finalizing bundle: %w", err)
+	}
+
+	bundleName := decryptedName + ".html"
+	var objectName string
+	if prefix != "" {
+		objectName = strings.TrimRight(prefix, "/") + "/" + bundleName
+	} else {
+		objectName = bundleName
+	}
+
+	// Re-open for upload. TeeReader hashes the bytes in-flight as they stream
+	// to GCS — one read of the file, no separate hash pass.
+	f, err := os.Open(bundleFile.Name())
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	fmt.Fprintf(progress, "Uploading  %s  →  gs://%s/%s\n", bundleName, bucket, objectName)
+	if err := gcsUpload(ctx, bucket, objectName, io.TeeReader(f, h)); err != nil {
 		return fmt.Errorf("uploading: %w", err)
 	}
-	fmt.Printf("Upload complete.  SHA-256: %s\n", checksum)
+	checksum := fmt.Sprintf("%x", h.Sum(nil))
+	fmt.Fprintf(progress, "Upload complete.  SHA-256: %s\n", checksum)
 
 	signedURL, err := gcsSignURL(ctx, bucket, objectName, signerSA, expiry)
 	if err != nil {
 		return fmt.Errorf("signing URL: %w", err)
 	}
 
-	printResult(signedURL, checksum, zipName, expiry, password)
+	if jsonOut {
+		return printResultJSON(signedURL, checksum, bundleName, expiry, password)
+	}
+	printResult(signedURL, checksum, bundleName, expiry, password)
 	return nil
 }
 
-// workspaceRE enforces the same format as scripts/transfer.py and .github/workflows/terraform.yml.
-// If the allowed format changes, update all three locations.
+// workspaceRE enforces the same format as .github/workflows/terraform.yml.
+// If the allowed format changes, update both locations.
 var workspaceRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,47}[a-z0-9]$`)
 
 // validateWorkspace checks that name conforms to the workspace naming rules.
-// Same regex as scripts/transfer.py and .github/workflows/terraform.yml.
+// Same regex as .github/workflows/terraform.yml.
 func validateWorkspace(name string) error {
 	if !workspaceRE.MatchString(name) {
 		return fmt.Errorf("invalid workspace name %q: must be 3-49 chars, lowercase letters, numbers, and hyphens only; cannot start or end with a hyphen", name)
@@ -327,13 +357,14 @@ func parseExpiry(s string) (time.Duration, error) {
 }
 
 // printResult prints the URL block and password block to stdout.
-func printResult(url, checksum, filename string, expiry time.Duration, password string) {
+func printResult(signedURL, checksum, filename string, expiry time.Duration, password string) {
 	expiresAt := time.Now().UTC().Add(expiry)
 	fmt.Println()
 	fmt.Println(strings.Repeat("=", 72))
 	fmt.Printf("Shareable URL (expires %s):\n", expiresAt.Format("2006-01-02 15:04 UTC"))
+	fmt.Printf("File:  %s\n", filename)
 	fmt.Println()
-	fmt.Println(url)
+	fmt.Println(signedURL)
 	fmt.Println()
 	fmt.Printf("Integrity:  SHA-256 = %s\n", checksum)
 	fmt.Println(strings.Repeat("=", 72))
@@ -343,6 +374,32 @@ func printResult(url, checksum, filename string, expiry time.Duration, password 
 	fmt.Println()
 	fmt.Println(password)
 	fmt.Println(strings.Repeat("─", 72))
+	fmt.Println()
+	fmt.Println("Recipient: open the URL in a browser, enter the password, the file downloads.")
+}
+
+// transferResult is the JSON shape emitted by --json.
+type transferResult struct {
+	URL       string `json:"url"`
+	Filename  string `json:"filename"`
+	SHA256    string `json:"sha256"`
+	ExpiresAt string `json:"expires_at"`
+	Password  string `json:"password"`
+}
+
+// printResultJSON writes a single JSON object to stdout.
+func printResultJSON(signedURL, checksum, filename string, expiry time.Duration, password string) error {
+	expiresAt := time.Now().UTC().Add(expiry)
+	result := transferResult{
+		URL:       signedURL,
+		Filename:  filename,
+		SHA256:    checksum,
+		ExpiresAt: expiresAt.Format(time.RFC3339),
+		Password:  password,
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
 }
 
 // formatSize formats a byte count with comma-separated thousands, e.g. 1,048,576.
@@ -363,7 +420,7 @@ func formatSize(n int64) string {
 
 // printUsage prints the top-level usage text.
 func printUsage() {
-	fmt.Print(`transfer — Secure File Transfer: encrypt, upload, and generate signed download URLs
+	fmt.Print(`transfer — Secure File Transfer: encrypt, upload, and generate a signed URL
 
 Usage:
   transfer <subcommand> [flags]
@@ -373,6 +430,20 @@ Subcommands:
   pack     Pack a folder into an encrypted zip, upload; print a signed URL and password
   list     List objects in the workspace bucket
   delete   Delete an object from the workspace bucket
+
+How it works:
+  The recipient opens the signed URL in any browser, enters the password,
+  and the original file downloads automatically. No software installation required.
+
+Examples:
+  transfer upload --workspace acme-q1 --file report.pdf --expiry 4h
+  transfer pack   --workspace acme-q1 --folder ./deliverables --prefix q1 --expiry 1d
+  transfer upload --workspace acme-q1 --file data.csv --json | jq .url
+  transfer list   --workspace acme-q1
+  transfer delete --workspace acme-q1 --object report.pdf.html --confirm report.pdf.html
+
+Environment:
+  TRANSFER_GCP_PROJECT   Override the GCP project (skips ADC project lookup)
 
 Run "transfer <subcommand> --help" for subcommand flags.
 `)
