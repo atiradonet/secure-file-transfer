@@ -90,13 +90,17 @@ jobs:
             if [[ $age -gt $ttl_seconds ]]; then
               echo ""
               echo "==> Destroying expired workspace: ${workspace} (age: ${age_display}, TTL: ${TTL_HOURS}h)"
-              if  terraform workspace select "${workspace}" \
-               && terraform destroy -auto-approve \
-               && terraform workspace select default \
-               && terraform workspace delete "${workspace}"; then
+              ws_ok=true
+              terraform workspace select "${workspace}" || { echo "  ✗ workspace select failed for ${workspace}"; ws_ok=false; }
+              if [[ $ws_ok == true ]]; then
+                terraform destroy -auto-approve || { echo "  ✗ terraform destroy failed for ${workspace}"; ws_ok=false; }
+              fi
+              # Always return to default before attempting workspace delete
+              terraform workspace select default 2>/dev/null || true
+              if [[ $ws_ok == true ]]; then
+                terraform workspace delete "${workspace}" || echo "  ⚠ workspace delete failed for ${workspace} — state entry may linger"
                 destroyed=$((destroyed + 1))
               else
-                echo "  ✗ Failed to destroy ${workspace}"
                 failed=$((failed + 1))
               fi
             else

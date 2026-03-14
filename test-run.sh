@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # test-run.sh — end-to-end walkthrough of the secure-file-transfer workflow.
 #
-# Runs through: provision → upload (single file) → pack (folder) → verify → tear down
-# Takes about 5 minutes.
+# Runs through: provision → upload (single file + JSON validation) → pack (with prefix) → verify → tear down
+# Takes about 8-10 minutes.
 
 set -euo pipefail
 
 WORKSPACE="test-run-$(date +%s)"
 TEST_DIR="/tmp/${WORKSPACE}"
 TEST_FILE="/tmp/${WORKSPACE}-single.txt"
+
+# Clean up test fixtures on exit (covers both success and early failure).
+cleanup() { rm -rf "$TEST_DIR" "$TEST_FILE"; }
+trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -20,8 +24,26 @@ ask()  { read -r -p "  $* [press Enter to continue] " _; }
 
 wait_for_run() {
   local run_id=$1
+  if [[ -z "$run_id" || "$run_id" == "null" ]]; then
+    echo "Error: could not find the workflow run. Check 'gh run list' manually."
+    exit 1
+  fi
   info "Waiting for workflow run $run_id..."
   gh run watch "$run_id" --exit-status
+}
+
+# Resolve the most recent workflow run created at or after $1 (ISO timestamp).
+# Retries for up to 15 s in case GitHub hasn't listed the run yet.
+get_run_id() {
+  local since=$1 run_id=""
+  for _ in 1 2 3 4 5; do
+    run_id=$(gh run list --workflow=terraform.yml --limit=10 \
+      --json databaseId,createdAt \
+      --jq "[.[] | select(.createdAt >= \"$since\")] | .[0].databaseId")
+    [[ -n "$run_id" && "$run_id" != "null" ]] && break
+    sleep 3
+  done
+  echo "$run_id"
 }
 
 # Verify the signed URL was used by checking GCS Data Access Audit Logs.
@@ -68,18 +90,38 @@ if ! gcloud auth application-default print-access-token &>/dev/null; then
 fi
 ok "GCP Application Default Credentials found"
 
+# Resolve and export the project so the Go binary finds it regardless of
+# whether it is embedded in ADC. GOOGLE_CLOUD_PROJECT is the standard GCP
+# env var recognised by all GCP SDKs.
+GOOGLE_CLOUD_PROJECT="$(gcloud config get-value project 2>/dev/null)"
+if [[ -z "$GOOGLE_CLOUD_PROJECT" ]]; then
+  echo "Error: GCP project not set. Run: gcloud config set project <project_id>"
+  exit 1
+fi
+export GOOGLE_CLOUD_PROJECT
+ok "GCP project: $GOOGLE_CLOUD_PROJECT"
+
 if ! gh auth status &>/dev/null; then
   echo "Error: gh CLI not authenticated. Run: gh auth login"
   exit 1
 fi
 ok "GitHub CLI authenticated"
 
-VENV_DIR="$(dirname "$0")/scripts/.venv"
-if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
-  echo "Error: Python venv not found. Run: cd scripts && python -m venv .venv && pip install -r requirements.txt"
+if ! command -v jq &>/dev/null; then
+  echo "Error: jq not found in PATH. Install with: brew install jq"
   exit 1
 fi
-ok "Python venv found"
+ok "jq found"
+
+# Build the Go binary via the Makefile (CGO_ENABLED=0 static binary).
+TRANSFER_BIN="$(dirname "$0")/transfer/transfer"
+step "Building Go binary"
+if ! command -v go &>/dev/null; then
+  echo "Error: go not found in PATH"
+  exit 1
+fi
+(cd "$(dirname "$0")/transfer" && GOMODCACHE="${TMPDIR:-/tmp}/gomod-transfer" make build)
+ok "Binary built: $TRANSFER_BIN"
 
 # ---------------------------------------------------------------------------
 # Step 1 — Create test fixtures
@@ -105,9 +147,7 @@ gh workflow run terraform.yml \
   -f action=apply \
   -f workspace="$WORKSPACE"
 
-sleep 3
-RUN_ID=$(gh run list --workflow=terraform.yml --limit=10 --json databaseId,createdAt \
-  --jq "[.[] | select(.createdAt >= \"$BEFORE\")] | .[0].databaseId")
+RUN_ID=$(get_run_id "$BEFORE")
 wait_for_run "$RUN_ID"
 ok "Infrastructure provisioned"
 info "Bucket: secure-transfer-${WORKSPACE}"
@@ -116,36 +156,58 @@ info "Bucket: secure-transfer-${WORKSPACE}"
 info "Waiting 90 s for IAM propagation..."
 sleep 90
 
-source "$VENV_DIR/bin/activate"
-
 # ---------------------------------------------------------------------------
 # Step 3 — Upload single file
 # ---------------------------------------------------------------------------
 step "3 / 5  Upload single file"
 
 UPLOAD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-python "$(dirname "$0")/scripts/transfer.py" upload \
+"$TRANSFER_BIN" upload \
   --workspace "$WORKSPACE" \
   --file "$TEST_FILE" \
   --expiry 30m
 
+# Validate --json output non-interactively.
+# Use --prefix json-test so this upload lands at a different object path and
+# does not overwrite the object the interactive URL above points to.
+info "Testing --json flag..."
+JSON_OUT=$("$TRANSFER_BIN" upload \
+  --workspace "$WORKSPACE" \
+  --file "$TEST_FILE" \
+  --prefix json-test \
+  --expiry 30m \
+  --json)
+for field in url filename sha256 expires_at password; do
+  val=$(echo "$JSON_OUT" | jq -r ".$field")
+  if [[ -z "$val" || "$val" == "null" ]]; then
+    echo "Error: --json output missing field '$field'"
+    exit 1
+  fi
+done
+ok "--json output is valid (url, filename, sha256, expires_at, password present)"
+
 echo ""
-ask "Download the zip above, enter the password, confirm the file contains the expected text — then press Enter"
+ask "Open the URL printed above in a browser, enter the password, confirm the file downloads and contains the expected text — then press Enter"
 
 # ---------------------------------------------------------------------------
-# Step 4 — Pack folder
+# Step 4 — Pack folder (with --prefix to exercise subfolder routing)
 # ---------------------------------------------------------------------------
 step "4 / 5  Pack folder"
 
-python "$(dirname "$0")/scripts/transfer.py" pack \
+"$TRANSFER_BIN" pack \
   --workspace "$WORKSPACE" \
   --folder "$TEST_DIR" \
+  --prefix test \
   --expiry 30m
 
-deactivate
-
 echo ""
-ask "Download the zip above, enter the password, verify all 3 files and the subfolder — then press Enter"
+ask "Open the URL above in a browser, enter the password, verify the zip downloads and contains all 3 files with the subfolder — then press Enter"
+
+# Verify the object was stored under the prefix.
+info "Verifying object stored under prefix 'test/'..."
+"$TRANSFER_BIN" list --workspace "$WORKSPACE" | grep "^test/" \
+  || { echo "Error: no objects found under 'test/' prefix"; exit 1; }
+ok "Object correctly stored under 'test/' prefix"
 
 # ---------------------------------------------------------------------------
 # Step 5 — Tear down
@@ -159,14 +221,11 @@ gh workflow run terraform.yml \
   -f workspace="$WORKSPACE" \
   -f confirm_destroy=destroy
 
-sleep 3
-RUN_ID=$(gh run list --workflow=terraform.yml --limit=10 --json databaseId,createdAt \
-  --jq "[.[] | select(.createdAt >= \"$BEFORE\")] | .[0].databaseId")
+RUN_ID=$(get_run_id "$BEFORE")
 wait_for_run "$RUN_ID"
 ok "Workspace destroyed"
 
 # ---------------------------------------------------------------------------
-rm -rf "$TEST_DIR" "$TEST_FILE"
 echo ""
 echo "══════════════════════════════════════════════════════════════════════"
 echo "  Test run complete. All steps passed."

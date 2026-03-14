@@ -14,7 +14,7 @@
 # Prerequisites:
 #   - gcloud CLI authenticated:  gcloud auth login && gcloud config set project <project_id>
 #   - gh CLI authenticated:      gh auth login
-#   - python3 in PATH
+#   - jq in PATH:                brew install jq  (or apt install jq)
 
 set -euo pipefail
 
@@ -34,6 +34,11 @@ fi
 
 if ! gh auth status &>/dev/null; then
   echo "Error: gh CLI not authenticated. Run: gh auth login"
+  exit 1
+fi
+
+if ! command -v jq &>/dev/null; then
+  echo "Error: jq not found in PATH. Install with: brew install jq  (or apt install jq)"
   exit 1
 fi
 
@@ -202,38 +207,25 @@ gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
 # ---------------------------------------------------------------------------
 echo ""
 echo "==> Enabling GCS Data Access Audit Logs..."
-gcloud projects get-iam-policy "$GCP_PROJECT" --format=json | python3 - "$GCP_PROJECT" << 'PYEOF'
-import sys, json, subprocess, tempfile, os
+POLICY_FILE=$(mktemp /tmp/iam-policy-XXXXXX.json)
+trap 'rm -f "$POLICY_FILE"' RETURN
+gcloud projects get-iam-policy "$GCP_PROJECT" --format=json > "$POLICY_FILE"
 
-project = sys.argv[1]
-policy  = json.load(sys.stdin)
-
-svc = "storage.googleapis.com"
-existing = policy.setdefault("auditConfigs", [])
-
-if any(c.get("service") == svc for c in existing):
-    print("    Audit logs already configured — skipping.")
-    sys.exit(0)
-
-existing.append({
-    "service": svc,
+if jq -e '.auditConfigs[]? | select(.service == "storage.googleapis.com")' \
+    "$POLICY_FILE" > /dev/null 2>&1; then
+  echo "    Audit logs already configured — skipping."
+else
+  jq '.auditConfigs |= (. // []) + [{
+    "service": "storage.googleapis.com",
     "auditLogConfigs": [
-        {"logType": "DATA_READ"},
-        {"logType": "DATA_WRITE"},
-    ],
-})
-
-with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-    json.dump(policy, f)
-    tmp = f.name
-
-subprocess.run(
-    ["gcloud", "projects", "set-iam-policy", project, tmp, "--quiet"],
-    check=True,
-)
-os.unlink(tmp)
-print("    Audit logs enabled.")
-PYEOF
+      {"logType": "DATA_READ"},
+      {"logType": "DATA_WRITE"}
+    ]
+  }]' "$POLICY_FILE" > "${POLICY_FILE}.new" && mv "${POLICY_FILE}.new" "$POLICY_FILE"
+  gcloud projects set-iam-policy "$GCP_PROJECT" "$POLICY_FILE" --quiet
+  echo "    Audit logs enabled."
+fi
+rm -f "$POLICY_FILE"
 
 # ---------------------------------------------------------------------------
 # 8. GitHub Actions secrets
@@ -256,6 +248,6 @@ echo "Done. Secrets set:"
 gh secret list
 echo ""
 echo "Next steps:"
-echo "  1. Install Python deps:  cd scripts && python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
-echo "  2. Provision:            gh workflow run terraform.yml -f action=apply -f workspace=<name>"
-echo "  3. Upload:               python scripts/transfer.py upload --workspace <name> --file <file>"
+echo "  1. Build the CLI:  cd transfer && make build"
+echo "  2. Provision:      gh workflow run terraform.yml -f action=apply -f workspace=<name>"
+echo "  3. Upload:         ./transfer/transfer upload --workspace <name> --file <file>"
